@@ -175,6 +175,17 @@ pub enum CatalogueError {
         #[source]
         error: CiteError,
     },
+    /// The declarations name another profile than the one the selection
+    /// read the options under.
+    #[error(
+        "the run reads the {declared} profile, and its documents were selected under the {selected} profile"
+    )]
+    ProfileMismatch {
+        /// The profile the selection read the options under.
+        selected: SpecProfile,
+        /// The profile the declarations name.
+        declared: SpecProfile,
+    },
 }
 
 /// What the party declares, which every document's plan reads.
@@ -193,7 +204,10 @@ pub struct Declarations {
     pub platform: bool,
     /// The specification profile whose text the run's citations are read
     /// against; a workflow citing text the profile lacks is skipped as
-    /// `cited-text-absent`.
+    /// `cited-text-absent`, under the released profile a workflow
+    /// resting on development text alone is skipped as `development-only`,
+    /// and under the development profile a workflow whose cited text the
+    /// snapshot contests is skipped as `contested-in-development`.
     pub profile: SpecProfile,
 }
 
@@ -600,6 +614,74 @@ pub fn absent_text_skips(
     Ok(skips)
 }
 
+/// The `development-only` skips of the workflows of `document` that rest on
+/// text only the development snapshot holds, which a released run never
+/// runs.
+///
+/// Each skip carries the workflow's first development-only citation, and its
+/// detail names it. No openEHR spec governs this — our own design: a
+/// development result never counts toward a released one.
+#[must_use]
+pub fn development_only_skips(document: &ArazzoDocument, repo_root: &Path) -> Vec<(String, Skip)> {
+    document
+        .description()
+        .workflows
+        .iter()
+        .filter_map(|workflow| {
+            let citation = structure::development_citation(workflow)?;
+            Some((
+                workflow.workflow_id.clone(),
+                Skip {
+                    reason: SkipReason::DevelopmentOnly,
+                    why: Why::of(&citation, repo_root),
+                    detail: Some(format!(
+                        "{} profile: the case rests on development text alone, `{}` ({}), and runs under the {} profile only",
+                        SpecProfile::Released,
+                        citation.source,
+                        citation.section,
+                        SpecProfile::Development
+                    )),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The `contested-in-development` skips of the workflows of `document`
+/// whose cited text the development snapshot keeps unchanged and contests,
+/// which a development run never grades.
+///
+/// Each skip carries the workflow's first contested citation, and its detail
+/// names the upstream report. No openEHR spec governs this — our own design:
+/// a development run grades no server on one side of a contradiction between
+/// two development texts.
+#[must_use]
+pub fn contested_skips(document: &ArazzoDocument, repo_root: &Path) -> Vec<(String, Skip)> {
+    document
+        .description()
+        .workflows
+        .iter()
+        .filter_map(|workflow| {
+            let citation = structure::contested_citation(workflow)?;
+            let report = citation.contested()?;
+            Some((
+                workflow.workflow_id.clone(),
+                Skip {
+                    reason: SkipReason::ContestedInDevelopment,
+                    why: Why::of(&citation, repo_root),
+                    detail: Some(format!(
+                        "{} profile: the snapshot keeps `{}` ({}) unchanged and contradicts it elsewhere, as upstream report #{report} records, and the case runs under the {} profile only",
+                        SpecProfile::Development,
+                        citation.source,
+                        citation.section,
+                        SpecProfile::Released
+                    )),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// The documents a run drives, the capability folders the statement claims
 /// and the option arms it selects, read before any document is loaded.
 #[derive(Debug)]
@@ -613,6 +695,7 @@ pub struct Selection {
     chapters: Option<Chapters>,
     reports: Option<Reports>,
     folder_of: BTreeMap<String, String>,
+    profile: SpecProfile,
 }
 
 impl Selection {
@@ -670,7 +753,13 @@ impl Selection {
 
     /// Selects every document of the catalogue under `root`, or only the
     /// documents `only` names when it names any, the capability folders
-    /// `statement` claims and the arms it selects.
+    /// `statement` claims and the arms it selects, for a run under
+    /// `profile`.
+    ///
+    /// The statement's arms are checked against every option, and an arm of
+    /// an option that does not hold under `profile`
+    /// ([`OptionDecl::holds_under`](crate::arazzo::capabilities::OptionDecl::holds_under))
+    /// is dropped: the run reads the catalogue without that option.
     ///
     /// # Errors
     /// [`CatalogueError`] when a folder does not list, `only` names a
@@ -681,6 +770,7 @@ impl Selection {
         root: &Path,
         statement: Option<&Value>,
         only: &[String],
+        profile: SpecProfile,
     ) -> Result<Self, CatalogueError> {
         let mut paths = document_paths(root)?;
         let folder_of: BTreeMap<String, String> = paths
@@ -708,7 +798,14 @@ impl Selection {
         } else {
             None
         };
-        let selected = selected_arms(statement, capabilities.as_ref())?;
+        let mut selected = selected_arms(statement, capabilities.as_ref())?;
+        let capabilities = capabilities.map(|all| all.in_profile(profile));
+        selected.retain(|arm| {
+            capabilities
+                .iter()
+                .flat_map(|c| c.options.values())
+                .any(|option| option.arms.contains_key(arm))
+        });
         let ranged = capabilities
             .as_ref()
             .map(Capabilities::ranged_components)
@@ -737,6 +834,7 @@ impl Selection {
             chapters,
             reports,
             folder_of,
+            profile,
         })
     }
 
@@ -744,12 +842,20 @@ impl Selection {
     /// citations are relative to.
     ///
     /// # Errors
-    /// [`CatalogueError`] when a document or a rows file does not load.
+    /// [`CatalogueError`] when a document or a rows file does not load, and
+    /// [`CatalogueError::ProfileMismatch`] when `declarations` name another
+    /// profile than the selection was read under.
     pub fn load(
         &self,
         repo_root: &Path,
         declarations: &Declarations,
     ) -> Result<Vec<Planned>, CatalogueError> {
+        if declarations.profile != self.profile {
+            return Err(CatalogueError::ProfileMismatch {
+                selected: self.profile,
+                declared: declarations.profile,
+            });
+        }
         let mut planned = Vec::new();
         let mut structure = self.chapters.as_ref().map(|chapters| {
             Placer::in_profile(
@@ -770,9 +876,18 @@ impl Selection {
                 self.choice(found),
                 repo_root,
             )?;
+            if declarations.profile == SpecProfile::Development {
+                for (workflow, skip) in contested_skips(&document, repo_root) {
+                    plan.skips.entry(workflow).or_insert(skip);
+                }
+            }
             if let Some(quotes) = quotes.as_mut() {
                 for (workflow, skip) in absent_text_skips(&document, &found.id, quotes, repo_root)?
                 {
+                    plan.skips.entry(workflow).or_insert(skip);
+                }
+            } else {
+                for (workflow, skip) in development_only_skips(&document, repo_root) {
                     plan.skips.entry(workflow).or_insert(skip);
                 }
             }
@@ -1043,6 +1158,9 @@ fn run_controls(planned: &[Planned]) -> BTreeMap<String, control::Control> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arazzo::reading::Tally;
+    use crate::arazzo::results::ResultRow;
+    use crate::arazzo::structure::{ArmRef, Standing};
     use assert_fs::prelude::*;
     use serde_json::json;
 
@@ -1376,8 +1494,13 @@ mod tests {
     /// The skip of every workflow of the System document under `statement`.
     fn system_skips(statement: &Value) -> Vec<Option<Skip>> {
         let world = needs_world();
-        let selection =
-            Selection::read(&world.path().join("catalogue"), Some(statement), &[]).unwrap();
+        let selection = Selection::read(
+            &world.path().join("catalogue"),
+            Some(statement),
+            &[],
+            SpecProfile::Released,
+        )
+        .unwrap();
         let planned = selection
             .load(world.path(), &Declarations::default())
             .unwrap();
@@ -1424,6 +1547,166 @@ mod tests {
         assert_eq!(unclaimed, vec![Some(format_not_claimed()); 3]);
     }
 
+    /// A development-only citation the vendored snapshot holds.
+    pub(crate) fn development_cite() -> Value {
+        json!({
+            "source": "specs/openehr-development/specifications-ITS-XML/components/AM/Release-1.4/Template.xsd",
+            "section": "complexType OPERATIONAL_TEMPLATE",
+            "quote": "Element 'annotations' added 3 May 2010"
+        })
+    }
+
+    /// A catalogue root holding the committed System document with its
+    /// first workflow resting on development text, the vendored specs
+    /// linked beside it.
+    fn development_only_world() -> Result<assert_fs::TempDir, Box<dyn std::error::Error>> {
+        system_world(|_| development_cite())
+    }
+
+    /// A catalogue root holding the committed System document with the
+    /// citation of its first workflow replaced by `cite` of it, the vendored
+    /// specs linked beside it.
+    fn system_world(
+        cite: impl FnOnce(Value) -> Value,
+    ) -> Result<assert_fs::TempDir, Box<dyn std::error::Error>> {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = assert_fs::TempDir::new()?;
+        std::os::unix::fs::symlink(repo.join("specs"), dir.path().join("specs"))?;
+        let path = repo.join("catalogue/cases/system/system_options.arazzo.yaml");
+        let mut document = crate::load::yaml_str_to_value(&std::fs::read_to_string(&path)?, &path)?;
+        let workflow = document
+            .pointer_mut("/workflows/0")
+            .and_then(Value::as_object_mut)
+            .ok_or("the System document has a workflow")?;
+        let current = workflow
+            .get("x-veredictum-cite")
+            .cloned()
+            .unwrap_or(Value::Null);
+        workflow.insert("x-veredictum-cite".to_owned(), cite(current));
+        dir.child("catalogue/cases/system/system_options.arazzo.yaml")
+            .write_str(&serde_json::to_string_pretty(&document)?)?;
+        Ok(dir)
+    }
+
+    /// The skip of every workflow of the catalogue under `world`, planned
+    /// under `profile`, in document order.
+    fn world_skips(
+        world: &assert_fs::TempDir,
+        profile: SpecProfile,
+    ) -> Result<Vec<Option<Skip>>, Box<dyn std::error::Error>> {
+        let selection = Selection::read(&world.path().join("catalogue"), None, &[], profile)?;
+        let declarations = Declarations {
+            profile,
+            ..Declarations::default()
+        };
+        let planned = selection.load(world.path(), &declarations)?;
+        Ok(planned
+            .iter()
+            .flat_map(|document| {
+                document
+                    .document
+                    .description()
+                    .workflows
+                    .iter()
+                    .map(|w| document.plan.skips.get(&w.workflow_id).cloned())
+            })
+            .collect())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ?"
+    )]
+    fn a_contested_case_is_skipped_under_development_and_judged_under_released()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let world = system_world(|mut cite| {
+            if let Some(cite) = cite.as_object_mut() {
+                cite.insert("development".to_owned(), json!({ "contested": 1008 }));
+            }
+            cite
+        })?;
+        assert_eq!(
+            world_skips(&world, SpecProfile::Released)?,
+            vec![None, None, None],
+            "the released profile judges the released quote"
+        );
+        let development = world_skips(&world, SpecProfile::Development)?;
+        let skip = development
+            .first()
+            .cloned()
+            .flatten()
+            .ok_or("the contested case is skipped")?;
+        assert_eq!(skip.reason, SkipReason::ContestedInDevelopment);
+        assert_eq!(skip.reason.to_string(), "contested-in-development");
+        assert_eq!(
+            skip.why.source,
+            "specs/openehr/ITS-REST/specifications/operations/options.yaml"
+        );
+        let detail = skip.detail.as_deref().ok_or("the skip names its report")?;
+        assert!(
+            detail.contains("upstream report #1008") && detail.contains("options.yaml"),
+            "{detail}"
+        );
+        assert_eq!(development.get(1..), Some(&[None, None][..]));
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ?"
+    )]
+    fn a_development_only_case_is_skipped_under_released_and_runs_under_development()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let world = development_only_world()?;
+        let skips = |profile| -> Result<Vec<Option<Skip>>, CatalogueError> {
+            let selection = Selection::read(&world.path().join("catalogue"), None, &[], profile)?;
+            let declarations = Declarations {
+                profile,
+                ..Declarations::default()
+            };
+            let planned = selection.load(world.path(), &declarations)?;
+            Ok(planned
+                .iter()
+                .flat_map(|document| {
+                    document
+                        .document
+                        .description()
+                        .workflows
+                        .iter()
+                        .map(|w| document.plan.skips.get(&w.workflow_id).cloned())
+                })
+                .collect())
+        };
+        let released = skips(SpecProfile::Released)?;
+        assert_eq!(released.len(), 3);
+        let skip = released
+            .first()
+            .cloned()
+            .flatten()
+            .ok_or("the development-only case is skipped")?;
+        assert_eq!(skip.reason, SkipReason::DevelopmentOnly);
+        assert_eq!(skip.reason.to_string(), "development-only");
+        assert!(skip.why.source.starts_with("specs/openehr-development/"));
+        let detail = skip
+            .detail
+            .as_deref()
+            .ok_or("the skip names its citation")?;
+        assert!(
+            detail.contains("specifications-ITS-XML/components/AM/Release-1.4/Template.xsd")
+                && detail.contains("complexType OPERATIONAL_TEMPLATE"),
+            "{detail}"
+        );
+        assert_eq!(released.get(1..), Some(&[None, None][..]));
+        assert_eq!(
+            skips(SpecProfile::Development)?,
+            vec![None, None, None],
+            "the development profile runs and judges it"
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_case_whose_cited_text_the_profile_lacks_is_skipped_with_what_is_missing() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -1456,5 +1739,227 @@ mod tests {
             [],
             "the release holds every text the catalogue cites"
         );
+    }
+
+    /// A catalogue root holding the committed System document under an
+    /// option scoped to the development profile, whose supported arm names
+    /// it, with a reading structure placing both.
+    fn scoped_world() -> assert_fs::TempDir {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir = assert_fs::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(repo.join("specs"), dir.path().join("specs")).unwrap();
+        dir.child("catalogue/cases/system/system_options.arazzo.yaml")
+            .write_str(
+                &std::fs::read_to_string(
+                    repo.join("catalogue/cases/system/system_options.arazzo.yaml"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        dir.child("catalogue/capabilities.yaml")
+            .write_str(
+                "options:\n  scoped:\n    description: d\n    profile: development\n    arms:\n      scoped-supported: { documents: [system_options] }\n      scoped-unsupported: { documents: [] }\n    x-veredictum-cite: { source: specs/openehr-development/specifications-AM/docs/UML/classes/org.openehr.am.aom2.adl_code_definitions.adoc, section: ADL_CODE_DEFINITIONS Class, quote: \"openEHR systems must support at least the at-coded ADL2 archetypes.\" }\n",
+            )
+            .unwrap();
+        dir.child("catalogue/chapters.yaml")
+            .write_str(
+                "chapters:\n  - chapter: system\n    title: System\n    folders:\n      - folder: system\n        title: System\n        sections:\n          - { section: options, title: OPTIONS }\noptions:\n  scoped: { theme: left-open, tier: options }\n",
+            )
+            .unwrap();
+        dir
+    }
+
+    /// What a scoped run planned and how its rows read.
+    #[derive(Debug)]
+    struct ScopedRun {
+        /// Each workflow's skip.
+        skips: Vec<Option<Skip>>,
+        /// Each workflow's standing.
+        standings: Vec<Standing>,
+        /// The BASE tally of its rows read as passed.
+        base: Tally,
+        /// The tally of the selected arms.
+        options: Tally,
+        /// Whether the outline lists the scoped option.
+        listed: bool,
+    }
+
+    /// What a run under `profile` with a statement selecting `arm` plans for
+    /// the System document.
+    fn scoped_run(profile: SpecProfile, arm: &str) -> Result<ScopedRun, CatalogueError> {
+        let world = scoped_world();
+        let statement = json!({ "claims": { "capabilities": ["system"] }, "options": [arm] });
+        let selection = Selection::read(
+            &world.path().join("catalogue"),
+            Some(&statement),
+            &[],
+            profile,
+        )?;
+        let declarations = Declarations {
+            profile,
+            ..Declarations::default()
+        };
+        let planned = selection.load(world.path(), &declarations)?;
+        let system = planned
+            .first()
+            .ok_or(CatalogueError::Empty(world.path().to_owned()))?;
+        let workflows = &system.document.description().workflows;
+        let skips = workflows
+            .iter()
+            .map(|w| system.plan.skips.get(&w.workflow_id).cloned())
+            .collect();
+        let standings = workflows
+            .iter()
+            .filter_map(|w| system.places.get(&w.workflow_id))
+            .map(|place| place.standing.clone())
+            .collect();
+        let outline = selection.outline(&planned);
+        let listed = outline
+            .as_ref()
+            .is_some_and(|o| o.options.iter().any(|option| option.option == "scoped"));
+        let rows = workflows
+            .iter()
+            .map(|w| ResultRow {
+                case: format!("system_options/{}", w.workflow_id),
+                row: 0,
+                status: crate::arazzo::results::Status::Passed,
+                inputs: rows::Row::new(),
+                generated: Vec::new(),
+                skip: None,
+                explanation: None,
+            })
+            .collect();
+        let mut run = results("http://sut".to_owned(), ServerIdentity::NotRecorded, rows);
+        run.outline = outline;
+        let reading = crate::arazzo::reading::read(&run);
+        Ok(ScopedRun {
+            skips,
+            standings,
+            base: reading.base_total,
+            options: reading.options.selected_tally(),
+            listed,
+        })
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ?"
+    )]
+    fn a_development_option_is_ignored_under_released_and_its_answer_is_no_error()
+    -> Result<(), CatalogueError> {
+        for arm in ["scoped-supported", "scoped-unsupported"] {
+            let ScopedRun {
+                skips,
+                standings,
+                base,
+                options,
+                listed,
+            } = scoped_run(SpecProfile::Released, arm)?;
+            assert_eq!(skips, vec![None, None, None], "{arm}");
+            assert_eq!(
+                standings,
+                vec![
+                    Standing::Base {
+                        section: "options".to_owned()
+                    };
+                    3
+                ],
+                "{arm}"
+            );
+            assert_eq!(base.tests, 3, "{arm}");
+            assert_eq!(options.tests, 0, "{arm}");
+            assert!(
+                !listed,
+                "{arm}: the released outline holds no development option"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ?"
+    )]
+    fn a_development_option_selects_either_arm_under_development() -> Result<(), CatalogueError> {
+        let option = Standing::Option {
+            arms: vec![ArmRef {
+                option: "scoped".to_owned(),
+                arm: "scoped-supported".to_owned(),
+            }],
+        };
+        let ScopedRun {
+            skips,
+            standings,
+            base,
+            options,
+            listed,
+        } = scoped_run(SpecProfile::Development, "scoped-supported")?;
+        assert_eq!(skips, vec![None, None, None]);
+        assert_eq!(standings, vec![option.clone(); 3]);
+        assert_eq!(base.tests, 0);
+        assert_eq!(
+            options.tests, 3,
+            "the selected arm's rows tally with the OPTIONS"
+        );
+        assert!(listed);
+        let ScopedRun {
+            skips,
+            standings,
+            base,
+            options,
+            listed,
+        } = scoped_run(SpecProfile::Development, "scoped-unsupported")?;
+        assert_eq!(skips.len(), 3);
+        for skip in skips {
+            let skip = skip.unwrap();
+            assert_eq!(skip.reason, SkipReason::OptionNotSelected);
+            assert_eq!(skip.why.section, "ADL_CODE_DEFINITIONS Class");
+        }
+        assert_eq!(standings, vec![option; 3]);
+        assert_eq!(base.tests, 0);
+        assert_eq!(options.tests, 0, "an unselected arm's rows are left out");
+        assert!(listed);
+        Ok(())
+    }
+
+    #[test]
+    fn a_selection_loads_under_its_own_profile_only() {
+        let world = scoped_world();
+        let selection = Selection::read(
+            &world.path().join("catalogue"),
+            None,
+            &[],
+            SpecProfile::Released,
+        )
+        .unwrap();
+        let declarations = Declarations {
+            profile: SpecProfile::Development,
+            ..Declarations::default()
+        };
+        assert!(matches!(
+            selection.load(world.path(), &declarations),
+            Err(CatalogueError::ProfileMismatch {
+                selected: SpecProfile::Released,
+                declared: SpecProfile::Development,
+            })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_arm_is_refused_under_both_profiles() {
+        let world = scoped_world();
+        let statement =
+            json!({ "claims": { "capabilities": ["system"] }, "options": ["scoped-typo"] });
+        for profile in SpecProfile::ALL {
+            assert!(
+                matches!(
+                    Selection::read(&world.path().join("catalogue"), Some(&statement), &[], *profile),
+                    Err(CatalogueError::UnknownArm(arm)) if arm == "scoped-typo"
+                ),
+                "{profile}"
+            );
+        }
     }
 }

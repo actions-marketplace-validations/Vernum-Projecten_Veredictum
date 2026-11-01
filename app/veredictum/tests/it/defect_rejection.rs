@@ -89,6 +89,12 @@ defects! {
         ("arazzo-floor-below.arazzo.yaml", "cases/system/system_options.arazzo.yaml", "arazzo-floor"),
     arazzo_extension_only_unmarked =>
         ("arazzo-extension-only-unmarked.arazzo.yaml", "cases/zz/zz-defect.arazzo.yaml", "arazzo-realization-scope"),
+    // A released case resting on a setup that cites development text alone.
+    arazzo_development_setup =>
+        ("arazzo-development-setup.arazzo.yaml", "cases/zz/zz-defect.arazzo.yaml", "arazzo-development-setup"),
+    // Two workflows whose `dependsOn` name each other.
+    arazzo_depends_on_cycle =>
+        ("arazzo-depends-on-cycle.arazzo.yaml", "cases/zz/zz-defect.arazzo.yaml", "arazzo-depends-on-cycle"),
     // The reading structure: a folder in no chapter or in two, a BASE
     // document with no section or an unknown one, a section nothing uses,
     // an OPTION document with a section, an option with no theme, a spec
@@ -104,6 +110,8 @@ defects! {
         ("structure-unknown-section.arazzo.yaml", "cases/system/system_options.arazzo.yaml", "arazzo-structure"),
     structure_unused_section =>
         ("structure-unused-section.chapters.yaml", "chapters.yaml", "arazzo-structure"),
+    structure_development_option_without_section =>
+        ("structure-development-option-without-section.arazzo.yaml", "cases/content/adl2_dv_parsable.arazzo.yaml", "arazzo-structure"),
     structure_option_with_section =>
         ("structure-option-with-section.arazzo.yaml", "cases/security/version_signature.arazzo.yaml", "arazzo-structure"),
     structure_option_unplaced =>

@@ -33,6 +33,7 @@ chapters:
           - { section: read, title: Read }
           - { section: update, title: Update }
           - { section: delete, title: Delete }
+          - { section: committal-headers, title: Committal headers }
           - { section: versioning-and-history, title: Versioning and history }
           - { section: refusals, title: Refusals }
       - folder: directory
@@ -149,6 +150,9 @@ options:
   composition-structured-write: { theme: simplified-formats, tier: recommended }
   content-unmatched-member: { theme: left-open, tier: spec-boundary }
   template-web-template: { theme: simplified-formats, tier: recommended }
+  template-example-xml-read: { theme: canonical-xml, tier: options }
+  template-example-flat-read: { theme: simplified-formats, tier: recommended }
+  template-example-structured-read: { theme: simplified-formats, tier: recommended }
   contribution-xml-read: { theme: canonical-xml, tier: options }
   contribution-xml-write: { theme: canonical-xml, tier: options }
   directory-xml-read: { theme: canonical-xml, tier: options }
@@ -174,3 +178,4 @@ options:
   aql-nonnumeric-aggregate: { theme: left-open, tier: spec-boundary }
   xml-namespace: { theme: canonical-xml, tier: spec-boundary }
   terminology-binding-unresolvable: { theme: left-open, tier: options }
+  adl2-id-coded: { theme: left-open, tier: options }

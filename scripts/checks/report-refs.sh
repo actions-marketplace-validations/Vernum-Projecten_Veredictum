@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Veredictum contributors
 # SPDX-License-Identifier: Apache-2.0
 # Every `report:` number in an `x-veredictum-cite` names an upstream report
-# (#632), in the workflow documents and in `capabilities.yaml` alike.
+# (#632), in the workflow documents and in `capabilities.yaml` alike, in every
+# Arazzo catalogue root of the tree (`catalogue-roots.sh`, #983). So does
+# every `contested:` number of a citation's `development` member (#1006),
+# which names the report recording a contradiction in the development text.
 #
 # A citation that rests on defective released text names the tracker issue the
 # defect is reported in (docs/ARCHITECTURE.md §15.4). `validate` is offline and can
@@ -20,24 +23,32 @@
 # The tracker must answer: a failed lookup other than "not found" stops the
 # guard rather than passing it.
 #
-# Usage: scripts/checks/report-refs.sh               # the catalogue
+# Usage: scripts/checks/report-refs.sh               # every catalogue root
 #        scripts/checks/report-refs.sh --self-test   # against a stub tracker
-# Env:   REPORT_REFS_ROOT  the tree to scan (default: catalogue)
+# Env:   REPORT_REFS_TREE  the git tree whose catalogue roots are scanned
+#                          (default: the repository)
 #        GITHUB_REPOSITORY the repository to ask (default: Vernum-Projecten/Veredictum)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# shellcheck source=scripts/checks/catalogue-roots.sh
+source scripts/checks/catalogue-roots.sh
 
-numbers() { # $1: root; prints each distinct report number once, ascending
+if ! command -v yq >/dev/null 2>&1; then
+  echo "report-refs: yq is not installed" >&2
+  exit 2
+fi
+
+numbers() { # $1: root; prints each distinct `<key> <number>` once, by number
   if [[ ! -d "$1" ]]; then
     return 0
   fi
-  grep -rhoE 'report:[[:space:]]*[0-9]+' "$1" --include='*.arazzo.yaml' --include='capabilities.yaml' |
-    sed -E 's/report:[[:space:]]*//' | sort -n -u
+  grep -rhoE '(report|contested):[[:space:]]*[0-9]+' "$1" --include='*.arazzo.yaml' --include='capabilities.yaml' |
+    sed -E 's/^(report|contested):[[:space:]]*/\1 /' | sort -k2,2n -k1,1 -u
 }
 
 check() { # $1: root, $2: repository; prints findings, returns 1 on any
-  local root="$1" repo="$2" n answer status found=0 seen=0
-  while IFS= read -r n; do
+  local root="$1" repo="$2" key n answer status found=0 seen=0
+  while read -r key n; do
     [[ -n "$n" ]] || continue
     seen=$((seen + 1))
     if answer="$(gh api "repos/${repo}/issues/${n}" \
@@ -48,7 +59,7 @@ check() { # $1: root, $2: repository; prints findings, returns 1 on any
     fi
     if [[ "$status" -ne 0 ]]; then
       if [[ "$answer" == *"Not Found"* || "$answer" == *"HTTP 404"* ]]; then
-        echo "report-refs: report: ${n} names no issue in ${repo}" >&2
+        echo "report-refs: ${key}: ${n} names no issue in ${repo}" >&2
         found=1
         continue
       fi
@@ -56,8 +67,8 @@ check() { # $1: root, $2: repository; prints findings, returns 1 on any
       exit 2
     fi
     case "$answer" in
-      "true "*) echo "report-refs: report: ${n} is a pull request, not an upstream report" >&2; found=1 ;;
-      "false false") echo "report-refs: report: ${n} does not carry the upstream-report label" >&2; found=1 ;;
+      "true "*) echo "report-refs: ${key}: ${n} is a pull request, not an upstream report" >&2; found=1 ;;
+      "false false") echo "report-refs: ${key}: ${n} does not carry the upstream-report label" >&2; found=1 ;;
       "false true") ;;
       *) echo "report-refs: unexpected tracker answer for #${n}: ${answer}" >&2; exit 2 ;;
     esac
@@ -67,22 +78,22 @@ check() { # $1: root, $2: repository; prints findings, returns 1 on any
 }
 
 snapshot() { # $1: root, $2: repository; prints findings, returns 1 on any
-  local file="$1/reports.yaml" repo="$2" line n title state answer live confirmed rest want found=0
-  local entry='^[[:space:]]+([0-9]+):[[:space:]]*\{[[:space:]]*title:[[:space:]]*"(.*)",[[:space:]]*state:[[:space:]]*([a-z]+)[[:space:]]*\}[[:space:]]*$'
+  local file="$1/reports.yaml" repo="$2" entries n title state answer live confirmed rest want found=0
   if [[ ! -f "$file" ]]; then
     return 0
   fi
-  while IFS= read -r line; do
-    if [[ ! "$line" =~ $entry ]]; then
-      if [[ "$line" =~ ^[[:space:]]+[0-9]+: ]]; then
-        echo "report-refs: cannot read the snapshot entry: ${line}" >&2
-        found=1
-      fi
+  # yq reads the flow and the block form alike; one line per entry, tab-split.
+  if ! entries="$(yq e '.reports // {} | to_entries[] | (.key | tostring) + "\t" + (.value.state // "" | tostring) + "\t" + (.value.title // "" | tostring)' "$file" 2>&1)"; then
+    echo "report-refs: cannot read the snapshot ${file}: ${entries}" >&2
+    return 1
+  fi
+  while IFS=$'\t' read -r n state title; do
+    [[ -n "$n$state$title" ]] || continue
+    if [[ ! "$n" =~ ^[0-9]+$ || ! "$state" =~ ^[a-z]+$ || -z "$title" ]]; then
+      echo "report-refs: cannot read the snapshot entry: ${n}" >&2
+      found=1
       continue
     fi
-    n="${BASH_REMATCH[1]}"
-    title="${BASH_REMATCH[2]//\\\"/\"}"
-    state="${BASH_REMATCH[3]}"
     if ! answer="$(gh api "repos/${repo}/issues/${n}" \
       --jq '"\(.state) \([.labels[].name] | index("upstream-confirmed") != null) \(.title)"' 2>&1)"; then
       echo "report-refs: the tracker did not answer for the snapshot entry #${n}: ${answer}" >&2
@@ -106,8 +117,22 @@ snapshot() { # $1: root, $2: repository; prints findings, returns 1 on any
       echo "report-refs: reports.yaml records #${n} as \"${title}\", and the tracker titles it \"${rest#* }\"" >&2
       found=1
     fi
-  done < "$file"
+  done <<< "$entries"
   return "$found"
+}
+
+scan() { # $1: a git tree, $2: repository; checks every catalogue root in it
+  local tree="$1" repo="$2" root roots status=0
+  roots="$(catalogue_roots "$tree")"
+  if [[ -z "$roots" ]]; then
+    echo "report-refs: no catalogue root (capabilities.yaml beside cases/) in ${tree}" >&2
+    return 1
+  fi
+  while IFS= read -r root; do
+    check "$tree/$root" "$repo" || status=1
+    snapshot "$tree/$root" "$repo" || status=1
+  done <<< "$roots"
+  return "$status"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
@@ -136,19 +161,22 @@ STUB
   printf 'x-veredictum-cite:\n  report: 7\n' > "$tmp/good/ehr/a.arazzo.yaml"
   printf 'x-veredictum-cite: { source: s, report: 8 }\n' > "$tmp/bad/ehr/a.arazzo.yaml"
   printf 'x-veredictum-cite:\n  report: 9\n---\nreport: 404\n' > "$tmp/bad/ehr/b.arazzo.yaml"
+  printf 'x-veredictum-cite: { source: s, report: 7, development: { contested: 8 } }\n' > "$tmp/bad/ehr/c.arazzo.yaml"
+  printf 'x-veredictum-cite:\n  development:\n    contested: 408\n' > "$tmp/bad/ehr/d.arazzo.yaml"
+  printf 'x-veredictum-cite: { source: s, development: { contested: 7 } }\n' > "$tmp/good/ehr/b.arazzo.yaml"
   printf 'options:\n  o:\n    x-veredictum-cite: { source: s, report: 405 }\n' > "$tmp/bad/capabilities.yaml"
   if ! PATH="$tmp/bin:$PATH" check "$tmp/good" stub/repo >/dev/null 2>&1; then
     echo "self-test: a labelled upstream report was refused" >&2
     exit 1
   fi
   out="$(PATH="$tmp/bin:$PATH" check "$tmp/bad" stub/repo 2>&1 || true)"
-  for want in "report: 8 does not carry" "report: 9 is a pull request" "report: 404 names no issue" "report: 405 names no issue"; do
+  for want in "report: 8 does not carry" "report: 9 is a pull request" "report: 404 names no issue" "report: 405 names no issue" "contested: 8 does not carry" "contested: 408 names no issue"; do
     if [[ "$out" != *"$want"* ]]; then
       echo "self-test: '${want}' was not reported" >&2
       exit 1
     fi
   done
-  printf 'reports:\n  7: { title: "A report that is seven", state: confirmed }\n' > "$tmp/good/reports.yaml"
+  printf 'reports:\n  7:\n    title: A report that\n      is seven\n    state: confirmed\n' > "$tmp/good/reports.yaml"
   printf 'reports:\n  7: { title: "Seven", state: open }\n  8: {title: broken}\n' > "$tmp/bad/reports.yaml"
   if ! PATH="$tmp/bin:$PATH" snapshot "$tmp/good" stub/repo >/dev/null 2>&1; then
     echo "self-test: a snapshot entry matching the tracker was refused" >&2
@@ -165,11 +193,33 @@ STUB
     echo "self-test: a missing tree yielded report numbers" >&2
     exit 1
   fi
-  echo "report-refs: self-test OK (a labelled report passes; unlabelled, pull request and missing are refused, in documents and capabilities; a snapshot entry is held to the tracker's title and state)."
+  # A second root, three levels down, carries a stale number the first does
+  # not; a capabilities.yaml with no cases/ beside it is no root.
+  tree="$tmp/tree"
+  mkdir -p "$tree/catalogue/cases/ehr" "$tree/fixtures/console/catalogue/cases/ehr" "$tree/notes"
+  git -C "$tree" init -q
+  printf 'options: {}\n' > "$tree/catalogue/capabilities.yaml"
+  printf 'x-veredictum-cite:\n  report: 7\n' > "$tree/catalogue/cases/ehr/a.arazzo.yaml"
+  printf 'options: {}\n' > "$tree/fixtures/console/catalogue/capabilities.yaml"
+  printf 'x-veredictum-cite:\n  report: 406\n' > "$tree/fixtures/console/catalogue/cases/ehr/a.arazzo.yaml"
+  printf 'x-veredictum-cite:\n  report: 407\n' > "$tree/notes/capabilities.yaml"
+  if [[ "$(catalogue_roots "$tree" | tr '\n' ' ')" != "catalogue fixtures/console/catalogue " ]]; then
+    echo "self-test: the catalogue roots are not the two directories holding cases/" >&2
+    exit 1
+  fi
+  out="$(PATH="$tmp/bin:$PATH" scan "$tree" stub/repo 2>&1 || true)"
+  if [[ "$out" != *"report: 406 names no issue"* || "$out" == *"report: 407"* ]]; then
+    echo "self-test: the second root's stale number was not refused alone: ${out}" >&2
+    exit 1
+  fi
+  mkdir -p "$tmp/empty"
+  git -C "$tmp/empty" init -q
+  if PATH="$tmp/bin:$PATH" scan "$tmp/empty" stub/repo >/dev/null 2>&1; then
+    echo "self-test: a tree with no catalogue root passed" >&2
+    exit 1
+  fi
+  echo "report-refs: self-test OK (a labelled report passes; unlabelled, pull request and missing are refused, as \`report:\` and as \`contested:\`, in documents and capabilities and in every catalogue root; a snapshot entry is held to the tracker's title and state)."
   exit 0
 fi
 
-status=0
-check "${REPORT_REFS_ROOT:-catalogue}" "${GITHUB_REPOSITORY:-Vernum-Projecten/Veredictum}" || status=1
-snapshot "${REPORT_REFS_ROOT:-catalogue}" "${GITHUB_REPOSITORY:-Vernum-Projecten/Veredictum}" || status=1
-exit "$status"
+scan "${REPORT_REFS_TREE:-.}" "${GITHUB_REPOSITORY:-Vernum-Projecten/Veredictum}"

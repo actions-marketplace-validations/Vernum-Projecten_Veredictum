@@ -289,6 +289,7 @@ fn target_shape_holds(
     let response = ResponseView {
         status: 200,
         headers: BTreeMap::new(),
+        text: body.to_string(),
         body: Ok(Some(body)),
     };
     let inputs = BTreeMap::new();
@@ -309,8 +310,9 @@ fn target_shape_holds(
 )]
 fn the_item_tag_target_criterion_holds_for_both_released_shapes()
 -> Result<(), Box<dyn std::error::Error>> {
-    // NOTE: RM item_tag.adoc types `target` as UID_BASED_ID; ITS-REST ItemTag.yaml wraps it
-    // in UObjectRefOfUidBasedId; upstream report #750 leaves the shape to the SEC.
+    // NOTE: ITS-REST schemas/common/ItemTag.yaml types `target` as UObjectRefOfUidBasedId, the
+    // development RM common org.openehr.rm.common.item_tag.adoc §ITEM_TAG Class as UID_BASED_ID;
+    // upstream report #750 leaves the shape to the SEC.
     let root = repo_root();
     let output = Regex::new(r"\{\$steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_]+)\}")?;
     for (file, id) in TARGET_SHAPE {

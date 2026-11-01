@@ -11,6 +11,8 @@
 
 pub mod aql;
 pub mod chapters;
+pub mod cycles;
+pub mod development;
 pub mod folders;
 pub mod profile;
 pub mod published;
@@ -25,6 +27,7 @@ use std::path::{Path, PathBuf};
 use crate::arazzo::capabilities::{CAPABILITIES_FILE, Capabilities};
 use crate::arazzo::cite::{QuoteChecker, check_level};
 use crate::arazzo::document::{ArazzoDocument, source_finding};
+use crate::arazzo::spec_profile::SpecProfile;
 
 /// The suffix every Arazzo document carries.
 pub const DOCUMENT_SUFFIX: &str = ".arazzo.yaml";
@@ -69,6 +72,11 @@ pub enum Gate {
     /// A document, folder, section, option or report the reading structure
     /// does not place, or places twice.
     Structure,
+    /// A workflow resting on released text that depends, at any depth, on a
+    /// development-only workflow.
+    DevelopmentSetup,
+    /// A workflow whose `dependsOn` leads back to itself.
+    DependsOnCycle,
 }
 
 impl Gate {
@@ -90,6 +98,8 @@ impl Gate {
             Self::Floor => "arazzo-floor",
             Self::Realization => "arazzo-realization-scope",
             Self::Structure => "arazzo-structure",
+            Self::DevelopmentSetup => "arazzo-development-setup",
+            Self::DependsOnCycle => "arazzo-depends-on-cycle",
         }
     }
 }
@@ -225,12 +235,17 @@ pub fn check_catalogue(catalogue_root: &Path, spec_root: Option<&Path>) -> Vec<G
         capabilities.as_ref(),
         repo_root.as_deref(),
     ));
+    findings.extend(development::check(&loaded));
+    findings.extend(cycles::check(&loaded));
     if let Some(specs) = spec_root {
+        let released = capabilities
+            .as_ref()
+            .map(|c| c.in_profile(SpecProfile::Released));
         check_surface(
             &workflows,
             specs,
             &documents,
-            capabilities.as_ref(),
+            released.as_ref(),
             &mut findings,
         );
     }
@@ -548,7 +563,8 @@ fn arm_covered(
     )
 }
 
-/// The surface gate, over the scope `cases/surface.yaml` declares.
+/// The surface gate, over the scope `cases/surface.yaml` declares, reading
+/// the options of the released profile in `capabilities`.
 ///
 /// A statement runs one arm of an option alone, so the documents under an
 /// option's arms cover what [`surface::option_covered`] credits them with:
@@ -629,6 +645,17 @@ fn document_id(path: &Path) -> Option<String> {
         .to_str()?
         .strip_suffix(DOCUMENT_SUFFIX)
         .map(str::to_owned)
+}
+
+/// `<document>/<workflowId>`, the way a case id names a workflow; a
+/// document whose file name is not `<id>.arazzo.yaml` is named by its path.
+pub(crate) fn workflow_label(
+    document: &ArazzoDocument,
+    workflow: &roas_arazzo::v1_1::Workflow,
+) -> String {
+    let path = document.path();
+    let id = document_id(path).unwrap_or_else(|| path.display().to_string());
+    format!("{id}/{}", workflow.workflow_id)
 }
 
 /// Whether `path` sits exactly one capability folder below `root`, as
@@ -940,6 +967,55 @@ mod tests {
         assert!(
             matches!(found.as_slice(), [(Gate::Aql, message)] if message.contains("case `query/adhoc` row 1")),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_permission_only_quote_needs_level_may_on_a_criterion_and_on_an_option() {
+        let permits = "The server MAY answer 202.";
+        let levels = |dir: &assert_fs::TempDir| -> Vec<String> {
+            gates(dir)
+                .into_iter()
+                .filter(|(gate, _)| *gate == Gate::Level)
+                .map(|(_, message)| message)
+                .collect()
+        };
+        let needs_may = |found: &[String]| {
+            found.len() == 1 && found.iter().all(|m| m.contains("needs `level: may`"))
+        };
+        let dir = world("");
+        let criterion = |level: &str| {
+            document("").replace(
+                "section: openapi, quote: x }",
+                &format!("section: openapi, quote: '{permits}'{level} }}"),
+            )
+        };
+        let case = "catalogue/cases/ehr/ehr.arazzo.yaml";
+        dir.child(case).write_str(&criterion("")).unwrap();
+        let found = levels(&dir);
+        assert!(needs_may(&found), "case criterion at `must`: {found:?}");
+        dir.child(case)
+            .write_str(&criterion(", level: may"))
+            .unwrap();
+        assert_eq!(
+            levels(&dir),
+            Vec::<String>::new(),
+            "case criterion at `may`"
+        );
+        let option = |level: &str| {
+            format!(
+                "options:\n  o:\n    description: d\n    arms:\n      a: {{ documents: [ehr] }}\n      b: {{ documents: [] }}\n    x-veredictum-cite: {{ source: specs/openehr/x.md, section: s, quote: '{permits}'{level} }}\n"
+            )
+        };
+        let caps = "catalogue/capabilities.yaml";
+        dir.child(caps).write_str(&option("")).unwrap();
+        let found = levels(&dir);
+        assert!(needs_may(&found), "option citation at `must`: {found:?}");
+        dir.child(caps).write_str(&option(", level: may")).unwrap();
+        assert_eq!(
+            levels(&dir),
+            Vec::<String>::new(),
+            "option citation at `may`"
         );
     }
 

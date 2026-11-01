@@ -17,8 +17,7 @@
 //! substituted as an escaped literal. A `jsonpath` condition is an RFC 9535
 //! query that holds when its nodelist is not empty (Arazzo 1.1.0 §`JSONPath`
 //! Conditions), with every embedded value escaped for an RFC 9535 string
-//! literal. An `xpath` condition is refused: the profile names `XPath` 3.1, and
-//! no engine for it is vetted here.
+//! literal. An `xpath` condition is judged by [`crate::arazzo::xpath`].
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -118,9 +117,18 @@ pub enum ParseError {
         /// The parser's verbatim reason.
         reason: String,
     },
-    /// An `xpath` condition, which the evaluator does not judge.
-    #[error("`{0}` is an xpath condition, and no vetted XPath 3.1 engine judges it")]
-    XPath(String),
+    /// An `xpath` condition that does not compile as XPath 3.1 under the
+    /// profile's static context.
+    #[error("`{query}` is not an XPath 3.1 expression the profile compiles: {reason}")]
+    XPath {
+        /// The expression as authored.
+        query: String,
+        /// The engine's verbatim reason.
+        reason: String,
+    },
+    /// An `xpath` condition whose context is not the whole response body.
+    #[error("an `xpath` criterion reads the whole `$response.body`, not `{0}`")]
+    XPathContext(String),
     /// An Expression Type Object names a language or version the profile
     /// does not use.
     #[error("expression type `{kind}` version `{version}` is outside the profile")]
@@ -231,6 +239,16 @@ pub enum EvalError {
     /// The substituted `jsonpath` condition does not parse.
     #[error("the JSONPath query `{0}` does not parse once substituted: {1}")]
     BadJsonPath(String, String),
+    /// The `xpath` condition cannot be formed or compiled once substituted.
+    #[error("the XPath expression `{0}` cannot be judged once substituted: {1}")]
+    BadXPath(String, String),
+    /// The response body is not well-formed XML, so an `xpath` condition
+    /// cannot read it.
+    #[error("the response body is not well-formed XML ({0}), so `$response.body` cannot be read")]
+    UnreadableXml(String),
+    /// The `xpath` evaluation raised a dynamic error.
+    #[error("the XPath expression `{0}` raised a dynamic error: {1}")]
+    XPath(String, String),
     /// A judge cannot decide on this exchange.
     #[error("{0}")]
     Unjudgeable(String),
@@ -263,6 +281,29 @@ pub struct ResponseView {
     pub headers: BTreeMap<String, String>,
     /// The body parsed as JSON: `Ok(None)` when empty, `Err` when unparsable.
     pub body: Result<Option<Value>, String>,
+    /// The body as received, which an `xpath` condition parses as XML.
+    pub text: String,
+}
+
+impl ResponseView {
+    /// Whether the response names a `Content-Type` that is not a JSON media
+    /// type, so its whole body is text rather than an unparsable JSON value.
+    ///
+    /// A JSON media type is `application/json` or any `+json` suffix
+    /// (<https://www.rfc-editor.org/rfc/rfc6839#section-3.1>). An absent
+    /// `Content-Type` declares nothing, so the body stays unreadable.
+    #[must_use]
+    pub fn declares_non_json(&self) -> bool {
+        self.headers.get("content-type").is_some_and(|value| {
+            let essence = value
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            essence != "application/json" && !essence.ends_with("+json")
+        })
+    }
 }
 
 /// Everything an expression may read at one point of a workflow run.
@@ -327,11 +368,17 @@ impl Scope<'_> {
                 .get(&name.to_ascii_lowercase())
                 .cloned()
                 .map(Value::String),
-            Expr::ResponseBody(pointer) => match &exchange()?.1.body {
-                Err(reason) => return Err(EvalError::UnreadableBody(reason.clone())),
-                Ok(None) => None,
-                Ok(Some(body)) => body.pointer(pointer).cloned(),
-            },
+            Expr::ResponseBody(pointer) => {
+                let response = exchange()?.1;
+                match &response.body {
+                    Err(_) if pointer.is_empty() && response.declares_non_json() => {
+                        Some(Value::String(response.text.clone()))
+                    }
+                    Err(reason) => return Err(EvalError::UnreadableBody(reason.clone())),
+                    Ok(None) => None,
+                    Ok(Some(body)) => body.pointer(pointer).cloned(),
+                }
+            }
         })
     }
 
@@ -604,7 +651,7 @@ const PLACEHOLDER: &str = "0";
 
 /// Checks every embedded `{$…}` expression of `template` parses, and returns
 /// the template with each replaced by [`PLACEHOLDER`].
-fn with_placeholders(template: &str) -> Result<String, ParseError> {
+pub(crate) fn with_placeholders(template: &str) -> Result<String, ParseError> {
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{$") {
@@ -800,6 +847,7 @@ mod tests {
                 status,
                 headers: BTreeMap::from([("location".to_owned(), "https://x/ehr/1".to_owned())]),
                 body: parsed,
+                text: body.to_owned(),
             },
         )
     }
@@ -938,6 +986,72 @@ mod tests {
         assert!(matches!(
             judge_simple("$response.body#/a == 3", 200, body),
             Err(EvalError::Incomparable(..))
+        ));
+    }
+
+    fn judge_typed(
+        condition: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<Judgement, EvalError> {
+        let (request, mut response) = exchange(201, body);
+        response
+            .headers
+            .insert("content-type".to_owned(), content_type.to_owned());
+        let inputs = BTreeMap::new();
+        let outputs = BTreeMap::new();
+        let scope = Scope {
+            inputs: &inputs,
+            outputs: &outputs,
+            workflows: &outputs,
+            exchange: Some((&request, &response)),
+        };
+        SimpleCondition::parse(condition)?.judge(&scope, condition)
+    }
+
+    #[test]
+    fn a_whole_text_body_reads_as_its_text() {
+        let adl = "operational_template (adl_version=2.0.6)";
+        assert!(
+            judge_typed("$response.body != null", "text/plain", adl)
+                .unwrap()
+                .holds
+        );
+        let (request, mut response) = exchange(201, adl);
+        response.headers.insert(
+            "content-type".to_owned(),
+            "text/plain; charset=utf-8".to_owned(),
+        );
+        let inputs = BTreeMap::new();
+        let outputs = BTreeMap::new();
+        let scope = Scope {
+            inputs: &inputs,
+            outputs: &outputs,
+            workflows: &outputs,
+            exchange: Some((&request, &response)),
+        };
+        let regex = RegexCriterion::parse("$response.body", "adl_version=2\\.0\\.6").unwrap();
+        assert!(regex.judge(&scope).unwrap().holds);
+    }
+
+    #[test]
+    fn a_body_labelled_json_that_does_not_parse_stays_unreadable() {
+        for content_type in [
+            "application/json",
+            "application/openehr.wt+json; charset=utf-8",
+        ] {
+            assert!(matches!(
+                judge_typed("$response.body != null", content_type, "garbled {"),
+                Err(EvalError::UnreadableBody(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_pointer_into_a_text_body_stays_unreadable() {
+        assert!(matches!(
+            judge_typed("$response.body#/a != null", "text/plain", "plain text"),
+            Err(EvalError::UnreadableBody(_))
         ));
     }
 

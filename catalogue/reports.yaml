@@ -8,18 +8,20 @@
 reports:
   161: { title: "AQL never assigns a behaviour to a containment pair the RM defines no relationship for", state: confirmed }
   229: { title: "AQL leaves SUM and AVG over an input type outside their declared set unassigned", state: closed }
+  240: { title: "REVISION_HISTORY's own text contradicts itself on item ordering", state: confirmed }
   307: { title: "AM never states whether a data node matching no constraint node is invalid", state: open }
   352: { title: "ITS-REST declares the Simplified Formats for EHR_STATUS, FOLDER and the PARTY kinds, which the Simplified Formats specification never maps", state: open }
   353: { title: "LOCATABLE.archetype_node_id's description says \"Always in the form of an at-code\" and contradicts itself two sentences later", state: open }
-  661: { title: "RM: REVISION_HISTORY.items is most-recent-first in the class purpose and most-recent-last everywhere else", state: open }
   673: { title: "ITS-REST: return=identifier is a SHOULD in one section and \"never 204\" with no keyword in another", state: open }
   721: { title: "Simplified Formats: the RM mapping tables name RM attributes and types the RM does not have", state: open }
   724: { title: "ITS-JSON: DV_URI and DV_EHR_URI require no value, and DV_INTERVAL limits are untyped objects", state: confirmed }
   735: { title: "ITS-REST: the bulk EHR delete declares its ehr_id subset as one UUID and templates it into the path", state: open }
   750: { title: "ITS-REST: the ITEM_TAG operations leave invariant refusals, filter matching and tag identity unassigned", state: open }
+  752: { title: "ITS-REST: deleted-version reads, deactivated-EHR writes and the update body uid have no assigned answer, and the RM and ITS-REST disagree on the copied uid", state: open }
   758: { title: "SMART on openEHR: the discovery example and scope grammar contradict each other, and no scope maps to an operation", state: open }
   759: { title: "ITS-REST: the Simplified Formats and canonical XML chapters require what they leave undefined", state: open }
   771: { title: "AQL: AND and OR precedence, regex node predicates, LIKE escapes, basic-format dates, whole-value comparisons and supertype paths are unassigned", state: open }
   939: { title: "AM: OPT2 says an operational template has no specialisation statement, while AOM2 and the ADL2 example require one", state: open }
   945: { title: "AM: the ADL2 operational template example binds its category at-code without the operational binding namespace", state: open }
   946: { title: "AM: ADL2 examples constrain the DV_QUANTITY property the RM removed, with external codes AOM2 cannot hold", state: open }
+  984: { title: "BASE: ARCHETYPE_ID admits only a major version, while AM Identification and ADL 2 require the three-part version", state: open }

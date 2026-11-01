@@ -9,8 +9,8 @@
 //! `docs/<id>/manifest_vars.adoc` states it as `:spec_status:`. A document
 //! whose status is DEVELOPMENT inside a release is released text. A TRIAL
 //! document is released for trial use, so behaviour grounded on it is read
-//! with the options; a RETIRED one is no longer part of the release, so no
-//! citation may name it. No openEHR spec governs how the instrument reads
+//! with the options; a RETIRED or SUPERSEDED one is no longer current text,
+//! so no citation may name it. No openEHR spec governs how the instrument reads
 //! the statuses — our own design.
 
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::arazzo::spec_profile::SpecProfile;
+use crate::arazzo::spec_profile::{SpecProfile, snapshot_source};
 
 /// The status a vendored manifest gives one document of a release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,6 +32,8 @@ pub enum SpecStatus {
     Trial,
     /// `RETIRED`: no longer part of the release.
     Retired,
+    /// `SUPERSEDED`: replaced by another document of the same text.
+    Superseded,
 }
 
 impl SpecStatus {
@@ -43,6 +45,7 @@ impl SpecStatus {
             "DEVELOPMENT" => Some(Self::Development),
             "TRIAL" => Some(Self::Trial),
             "RETIRED" => Some(Self::Retired),
+            "SUPERSEDED" => Some(Self::Superseded),
             _ => None,
         }
     }
@@ -55,6 +58,7 @@ impl fmt::Display for SpecStatus {
             Self::Development => "DEVELOPMENT",
             Self::Trial => "TRIAL",
             Self::Retired => "RETIRED",
+            Self::Superseded => "SUPERSEDED",
         })
     }
 }
@@ -185,20 +189,30 @@ impl Maturities {
     /// own, is the document; its status is its
     /// `docs/<id>/manifest_vars.adoc` `:spec_status:` when that file exists,
     /// else the manifest's. A file under a component naming no document is
-    /// [`Maturity::Component`].
+    /// [`Maturity::Component`]. A file of the development snapshot
+    /// ([`snapshot_source`]) is read the same way from the snapshot's own
+    /// manifests, under every profile.
     ///
     /// # Errors
     /// [`MaturityError`] when no manifest covers the file, the document
     /// states no known status, or the manifest does not read.
     pub fn of(&mut self, source: &str) -> Result<Maturity, MaturityError> {
+        match snapshot_source(source) {
+            Some(shaped) => self.of_in(&shaped, SpecProfile::Development),
+            None => self.of_in(source, self.profile),
+        }
+    }
+
+    /// The maturity of `source` in `profile`'s manifests.
+    fn of_in(&mut self, source: &str, profile: SpecProfile) -> Result<Maturity, MaturityError> {
         if source.starts_with("specs/rest-oas/") {
-            return self.document("ITS-REST", "REST_OAS_files");
+            return self.document(profile, "ITS-REST", "REST_OAS_files");
         }
         if source.starts_with("specs/its-json-schemas/") {
-            return self.document("ITS-JSON", "ITS-JSON");
+            return self.document(profile, "ITS-JSON", "ITS-JSON");
         }
         if source.starts_with(XML_V1_BUNDLE) {
-            return self.document("ITS-XML", "ITS-XML-v1");
+            return self.document(profile, "ITS-XML", "ITS-XML-v1");
         }
         if let Some(rest) = source.strip_prefix(XML_V2_BUNDLE) {
             let folder = rest
@@ -206,7 +220,7 @@ impl Maturities {
                 .next()
                 .filter(|folder| !folder.is_empty() && rest.contains('/'))
                 .ok_or_else(|| MaturityError::NoManifest(source.to_owned()))?;
-            return self.document("ITS-XML", &format!("ITS-XML-{folder}"));
+            return self.document(profile, "ITS-XML", &format!("ITS-XML-{folder}"));
         }
         let Some((component, inner)) = source
             .strip_prefix("specs/openehr/")
@@ -214,7 +228,7 @@ impl Maturities {
         else {
             return Err(MaturityError::NoManifest(source.to_owned()));
         };
-        let entries = self.manifest(component)?.to_vec();
+        let entries = self.manifest(profile, component)?.to_vec();
         let named = inner.split('/').find_map(|segment| {
             let stem = segment.split('.').next().unwrap_or(segment);
             let listed = entries
@@ -222,13 +236,13 @@ impl Maturities {
                 .find(|(id, _)| id == segment || id == stem)
                 .map(|(id, _)| id.clone());
             listed.or_else(|| {
-                self.vars_path(component, segment)
+                self.vars_path(profile, component, segment)
                     .is_file()
                     .then(|| segment.to_owned())
             })
         });
         match named {
-            Some(document) => self.document(component, &document),
+            Some(document) => self.document(profile, component, &document),
             None => Ok(Maturity::Component {
                 component: component.to_owned(),
             }),
@@ -236,9 +250,14 @@ impl Maturities {
     }
 
     /// The maturity of `document` in `component`'s manifest.
-    fn document(&mut self, component: &str, document: &str) -> Result<Maturity, MaturityError> {
-        let from_vars = self.manifest_vars(component, document);
-        let entries = self.manifest(component)?;
+    fn document(
+        &mut self,
+        profile: SpecProfile,
+        component: &str,
+        document: &str,
+    ) -> Result<Maturity, MaturityError> {
+        let from_vars = self.manifest_vars(profile, component, document);
+        let entries = self.manifest(profile, component)?;
         let listed = entries.iter().find(|(id, _)| id == document);
         let found = from_vars.or_else(|| listed.and_then(|(_, status)| status.clone()));
         let no_status = |found: String| MaturityError::NoStatus {
@@ -257,8 +276,13 @@ impl Maturities {
 
     /// The `:spec_status:` a document's `manifest_vars.adoc` states, when
     /// the file exists and states one.
-    fn manifest_vars(&self, component: &str, document: &str) -> Option<String> {
-        let path = self.vars_path(component, document);
+    fn manifest_vars(
+        &self,
+        profile: SpecProfile,
+        component: &str,
+        document: &str,
+    ) -> Option<String> {
+        let path = self.vars_path(profile, component, document);
         // NOTE: no openEHR spec governs this — our own design; a document without its own
         // manifest_vars.adoc takes the status its component manifest lists.
         let text = std::fs::read_to_string(path).ok()?;
@@ -269,39 +293,59 @@ impl Maturities {
     }
 
     /// Where `document` of `component` states its own status.
-    fn vars_path(&self, component: &str, document: &str) -> PathBuf {
+    fn vars_path(&self, profile: SpecProfile, component: &str, document: &str) -> PathBuf {
         self.repo_root
-            .join(self.profile.component_dir(component))
+            .join(profile.component_dir(component))
             .join("docs")
             .join(document)
             .join("manifest_vars.adoc")
     }
 
-    /// The `(id, spec_status)` entries of `component`'s manifest.
-    fn manifest(&mut self, component: &str) -> Result<&[(String, Option<String>)], MaturityError> {
+    /// The document ids `component`'s manifest in `profile`'s tree lists, in
+    /// manifest order.
+    ///
+    /// # Errors
+    /// [`MaturityError::NoManifest`] when the component has no manifest, and
+    /// [`MaturityError::Unreadable`] when it does not read.
+    pub fn document_ids(
+        &mut self,
+        profile: SpecProfile,
+        component: &str,
+    ) -> Result<Vec<String>, MaturityError> {
+        Ok(self
+            .manifest(profile, component)?
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect())
+    }
+
+    /// The `(id, spec_status)` entries of `component`'s manifest in
+    /// `profile`'s tree.
+    fn manifest(
+        &mut self,
+        profile: SpecProfile,
+        component: &str,
+    ) -> Result<&[(String, Option<String>)], MaturityError> {
         let repo_root = &self.repo_root;
-        let directory = self.profile.component_dir(component);
-        let entry = self
-            .manifests
-            .entry(component.to_owned())
-            .or_insert_with(|| {
-                let path = repo_root.join(&directory).join("manifest.json");
-                if !path.is_file() {
-                    return Err(MaturityError::NoManifest(format!("{directory}/")));
-                }
-                let unreadable = |reason: String| MaturityError::Unreadable {
-                    path: path.display().to_string(),
-                    reason,
-                };
-                let text = std::fs::read_to_string(&path).map_err(|e| unreadable(e.to_string()))?;
-                let manifest: Manifest =
-                    serde_json::from_str(&text).map_err(|e| unreadable(e.to_string()))?;
-                Ok(manifest
-                    .specifications
-                    .into_iter()
-                    .map(|entry| (entry.id, entry.spec_status))
-                    .collect())
-            });
+        let directory = profile.component_dir(component);
+        let entry = self.manifests.entry(directory.clone()).or_insert_with(|| {
+            let path = repo_root.join(&directory).join("manifest.json");
+            if !path.is_file() {
+                return Err(MaturityError::NoManifest(format!("{directory}/")));
+            }
+            let unreadable = |reason: String| MaturityError::Unreadable {
+                path: path.display().to_string(),
+                reason,
+            };
+            let text = std::fs::read_to_string(&path).map_err(|e| unreadable(e.to_string()))?;
+            let manifest: Manifest =
+                serde_json::from_str(&text).map_err(|e| unreadable(e.to_string()))?;
+            Ok(manifest
+                .specifications
+                .into_iter()
+                .map(|entry| (entry.id, entry.spec_status))
+                .collect())
+        });
         entry.as_deref().map_err(Clone::clone)
     }
 }
@@ -360,6 +404,68 @@ mod tests {
     }
 
     #[test]
+    fn a_document_the_snapshot_supersedes_is_read_as_superseded_and_never_trial() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let found = Maturities::in_profile(&root, SpecProfile::Development)
+            .of("specs/openehr/AM/docs/Identification/master07-referencing.adoc")
+            .unwrap();
+        assert_eq!(
+            found,
+            Maturity::Document {
+                component: "AM".to_owned(),
+                document: "Identification".to_owned(),
+                status: SpecStatus::Superseded,
+            }
+        );
+        assert!(!found.is_trial());
+    }
+
+    #[test]
+    fn the_its_xml_1_0_2_bundle_reads_stable_under_the_development_profile() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut development = Maturities::in_profile(&root, SpecProfile::Development);
+        assert_eq!(
+            development.of("specs/its-xml-schemas/its-xml-1.0.2-nsv1/ALL/Template.xsd"),
+            Ok(Maturity::Document {
+                component: "ITS-XML".to_owned(),
+                document: "ITS-XML-v1".to_owned(),
+                status: SpecStatus::Stable,
+            })
+        );
+        assert_eq!(
+            development.of("specs/its-xml-schemas/its-xml-2.0.0-nsv2/AM/Release-1.4/Template.xsd"),
+            Ok(Maturity::Document {
+                component: "ITS-XML".to_owned(),
+                document: "ITS-XML-AM".to_owned(),
+                status: SpecStatus::Trial,
+            })
+        );
+    }
+
+    #[test]
+    fn a_snapshot_file_reads_its_status_from_the_snapshot_under_every_profile() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = "specs/openehr-development/specifications-AM/docs/Identification/master07-referencing.adoc";
+        for profile in SpecProfile::ALL {
+            assert_eq!(
+                Maturities::in_profile(&root, *profile).of(source),
+                Ok(Maturity::Document {
+                    component: "AM".to_owned(),
+                    document: "Identification".to_owned(),
+                    status: SpecStatus::Superseded,
+                }),
+                "{profile}"
+            );
+        }
+        assert_eq!(
+            maturities()
+                .of("specs/openehr-development/specifications-ITS-XML/components/AM/Release-1.4/Template.xsd")
+                .map(|m| m.is_trial()),
+            Ok(true)
+        );
+    }
+
+    #[test]
     fn a_file_of_no_single_document_is_component_text_and_never_trial() {
         let found = maturities()
             .of("specs/openehr/ITS-REST/specifications/responses/201_EHR.yaml")
@@ -390,5 +496,9 @@ mod tests {
             Err(MaturityError::NoManifest(_))
         ));
         assert_eq!(SpecStatus::of_token("OBSOLETE"), None);
+        assert_eq!(
+            SpecStatus::of_token("SUPERSEDED"),
+            Some(SpecStatus::Superseded)
+        );
     }
 }

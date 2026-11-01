@@ -320,7 +320,10 @@ is the precedent to imitate, not a path in this tree.
   MEASURES OR MINTS: the run clock and its estimate, the connect probe's
   round trip, the run's own id, and the address the fixture SUT bound — plus the output
   directory that id names, rewritten inside the engine's output tail and
-  every results path a screen prints. What a run RECORDED is never pinned:
+  every results path a screen prints, and every id the engine generates for
+  a generated input, numbered in the order a screen first names it (#990),
+  and the engine version the chrome's footer prints, pinned at `0.3.1` so a
+  release restales no image (#1007). What a run RECORDED is never pinned:
   the case counter, the case driving, the engine's own words and the
   finished tally stay verbatim, because a screenshot that redacted them
   would document a run nobody drove. The pinning happens where a value is

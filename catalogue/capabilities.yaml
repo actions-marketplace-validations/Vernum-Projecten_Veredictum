@@ -1,7 +1,9 @@
 # The options a statement answers: behaviour the released text leaves to the
 # implementation. Each arm names the documents that test it, by document id;
 # a statement selects one arm per option through its `options` list, and the
-# documents of every other arm are skipped with `option-not-selected`.
+# documents of every other arm are skipped with `option-not-selected`. An
+# option with `profile: development` is behaviour the development text alone
+# leaves open: a released run reads the catalogue without it.
 options:
   ehr-xml-read:
     description: >-
@@ -239,7 +241,7 @@ options:
       this one answers 415.
     arms:
       composition-flat-write-accepted:
-        documents: [composition_write_flat, flat_context, flat_mapping, flat_structure, flat_commit_refused, flat_ranges, flat_context_values, flat_rm_attributes, flat_entries, flat_rm_refused, flat_read]
+        documents: [composition_write_flat, flat_context, flat_mapping, flat_structure, flat_commit_refused, flat_ranges, flat_context_values, flat_rm_attributes, flat_entries, flat_rm_refused, flat_read, flat_adl2]
       composition-flat-write-refused:
         documents: [composition_write_flat_unsupported]
     x-veredictum-cite:
@@ -289,6 +291,54 @@ options:
         documents: [template_adl14_web_template]
       template-web-template-unsupported:
         documents: [template_adl14_web_template_not_acceptable]
+    x-veredictum-cite:
+      source: specs/openehr/ITS-REST/specifications/docs/overview/Resources.md
+      section: Data representation
+      quote: "Additionally, the **Simplified Formats** format SHOULD be supported, while other alternative formats MAY be supported as well, depending on the use case."
+      level: should
+  template-example-xml-read:
+    description: >-
+      Whether the service serves the example data instance of a stored ADL
+      1.4 or ADL 2 operational template in canonical XML when a client asks
+      for it with Accept application/xml.
+    arms:
+      template-example-xml-supported:
+        documents: [template_example_xml, template_example_xml_adl2]
+      template-example-xml-unsupported:
+        documents: [template_example_xml_not_acceptable, template_example_xml_not_acceptable_adl2]
+    x-veredictum-cite:
+      source: specs/openehr/ITS-REST/specifications/docs/overview/Resources.md
+      section: Data representation
+      quote: "Services MUST support at least one of the openEHR **XML** or **JSON** canonical formats for resource representation."
+  template-example-flat-read:
+    description: >-
+      Whether the service serves the example data instance of a stored ADL
+      1.4 or ADL 2 operational template in the Simplified Flat JSON format
+      when a client asks for it with Accept. The release recommends the
+      Simplified Formats, so a service that does not serve this one answers
+      406.
+    arms:
+      template-example-flat-supported:
+        documents: [template_example_flat, template_example_flat_adl2]
+      template-example-flat-unsupported:
+        documents: [template_example_flat_not_acceptable, template_example_flat_not_acceptable_adl2]
+    x-veredictum-cite:
+      source: specs/openehr/ITS-REST/specifications/docs/overview/Resources.md
+      section: Data representation
+      quote: "Additionally, the **Simplified Formats** format SHOULD be supported, while other alternative formats MAY be supported as well, depending on the use case."
+      level: should
+  template-example-structured-read:
+    description: >-
+      Whether the service serves the example data instance of a stored ADL
+      1.4 or ADL 2 operational template in the Simplified Structured JSON
+      format when a client asks for it with Accept. The release recommends
+      the Simplified Formats, so a service that does not serve this one
+      answers 406.
+    arms:
+      template-example-structured-supported:
+        documents: [template_example_structured, template_example_structured_adl2]
+      template-example-structured-unsupported:
+        documents: [template_example_structured_not_acceptable, template_example_structured_not_acceptable_adl2]
     x-veredictum-cite:
       source: specs/openehr/ITS-REST/specifications/docs/overview/Resources.md
       section: Data representation
@@ -667,16 +717,21 @@ options:
       report: 229
   xml-namespace:
     description: >-
-      Which published canonical XML lineage the service serves: the
-      Release-1.0.2 schemas in namespace http://schemas.openehr.org/v1, or the
-      Release-2.0.0 schemas in http://schemas.openehr.org/v2. The release
-      requires conformance to "the published XSDs" and names neither, so
-      neither arm has a document yet.
+      Whether the service also accepts canonical XML request payloads in the
+      TRIAL Release-2.0.0 lineage, namespace http://schemas.openehr.org/v2.
+      The release requires conformance to "the published XSDs" and names no
+      lineage, while ITS-XML marks Release-1.0.2 (namespace
+      http://schemas.openehr.org/v1) STABLE and Release-2.0.0 TRIAL, and the
+      operation examples are v1. Acceptance of v1 is therefore BASE, and this
+      option asks only about v2. The xml-namespace-v1 arm is the service that
+      accepts v1 alone and has no document, since no sentence requires a
+      refusal of v2. The xml-namespace-v2 arm's documents are development-only,
+      because they rest on the development AM 1.4 schemas.
     arms:
       xml-namespace-v1:
         documents: []
       xml-namespace-v2:
-        documents: []
+        documents: [template_adl14_xml_v2]
     x-veredictum-cite:
       source: specs/openehr/ITS-REST/specifications/docs/overview/Resources.md
       section: XML Format
@@ -700,6 +755,63 @@ options:
       source: specs/openehr/BASE/docs/architecture_overview/master12-terminology.adoc
       section: Binding Terminology Value-sets to Archetypes
       quote: "Currently there is no standard for such queries."
+  adl2-id-coded:
+    description: >-
+      Whether the service accepts id-coded ADL 2 material: id-coded
+      operational templates on upload, and compositions whose node ids are
+      id-codes against them. The development text makes the at-code system
+      the one an openEHR system must support ("The **at-code coding system**
+      must be used for systems that need to be conformant to the _openEHR
+      Reference Model (RM)_", ADL2 master02-overview.adoc §An Example) and
+      requires id-coded support of no server, nor its refusal. The option
+      exists under the development profile alone: the release shows no
+      other ADL 2 coding, so a released run reads these documents as BASE.
+      The unsupported arm has no document, since no sentence requires a
+      refusal.
+    profile: development
+    arms:
+      adl2-id-coded-supported:
+        documents:
+          - adl2_dv_boolean
+          - adl2_dv_coded_text
+          - adl2_dv_count
+          - adl2_dv_date
+          - adl2_dv_date_time
+          - adl2_dv_duration
+          - adl2_dv_ehr_uri
+          - adl2_dv_interval_count
+          - adl2_dv_interval_date
+          - adl2_dv_interval_date_time
+          - adl2_dv_interval_duration
+          - adl2_dv_interval_ordinal
+          - adl2_dv_interval_proportion
+          - adl2_dv_interval_quantity
+          - adl2_dv_interval_scale
+          - adl2_dv_interval_time
+          - adl2_dv_multimedia
+          - adl2_dv_ordinal
+          - adl2_dv_parsable
+          - adl2_dv_proportion
+          - adl2_dv_quantity
+          - adl2_dv_scale
+          - adl2_dv_text
+          - adl2_dv_time
+          - adl2_dv_uri
+          - adl2_item_tree
+          - template_adl2
+          - flat_adl2
+          - template_example_xml_adl2
+          - template_example_xml_not_acceptable_adl2
+          - template_example_flat_adl2
+          - template_example_flat_not_acceptable_adl2
+          - template_example_structured_adl2
+          - template_example_structured_not_acceptable_adl2
+      adl2-id-coded-unsupported:
+        documents: []
+    x-veredictum-cite:
+      source: specs/openehr-development/specifications-AM/docs/UML/classes/org.openehr.am.aom2.adl_code_definitions.adoc
+      section: ADL_CODE_DEFINITIONS Class
+      quote: "openEHR systems must support at least the at-coded ADL2 archetypes."
 # What a document needs from the statement before it runs, by document id.
 # `formats` lists the wire formats the server must serve or process for the
 # document, in the statement's `tech_profiles` vocabulary, and a statement
@@ -742,6 +854,7 @@ documents:
   contribution_read_flat: { formats: [canonical-json, wt-flat] }
   contribution_write_flat: { formats: [canonical-json, wt-flat] }
   contribution_write_flat_accept: { formats: [canonical-json, wt-flat] }
+  flat_adl2: { formats: [canonical-json, wt-flat] }
   flat_commit_refused: { formats: [wt-flat] }
   flat_context: { formats: [canonical-json, wt-flat] }
   flat_context_values: { formats: [canonical-json, wt-flat] }
@@ -761,6 +874,12 @@ documents:
   structured_commit: { formats: [canonical-json, wt-structured] }
   structured_read: { formats: [canonical-json, wt-structured] }
   template_adl14_web_template: { formats: [wt] }
+  template_example_xml: { formats: [canonical-xml] }
+  template_example_xml_adl2: { formats: [canonical-xml] }
+  template_example_flat: { formats: [wt-flat] }
+  template_example_flat_adl2: { formats: [wt-flat] }
+  template_example_structured: { formats: [wt-structured] }
+  template_example_structured_adl2: { formats: [wt-structured] }
 # The documents whose only wire format is canonical JSON, sent by their own
 # steps or by a setup they name in `dependsOn`.
   admin_ehr_delete: { formats: [canonical-json] }
@@ -769,6 +888,7 @@ documents:
   admin_ehr_delete_all_refused: { formats: [canonical-json] }
   admin_ehr_delete_all_unfiltered: { formats: [canonical-json] }
   agent: { formats: [canonical-json] }
+  agent_direct_commit: { formats: [canonical-json] }
   agent_refused: { formats: [canonical-json] }
   agent_tags: { formats: [canonical-json] }
   anonymous_ehr: { formats: [canonical-json] }
@@ -779,6 +899,7 @@ documents:
   aql_semantics: { formats: [canonical-json] }
   aql_stored: { formats: [canonical-json] }
   aql_stored_top: { formats: [canonical-json] }
+  aql_version_predicate: { formats: [canonical-json] }
   aqlc_aggregation: { formats: [canonical-json] }
   aqlc_from: { formats: [canonical-json] }
   aqlc_order_by: { formats: [canonical-json] }
@@ -791,6 +912,8 @@ documents:
   composition_create: { formats: [canonical-json] }
   composition_create_refused: { formats: [canonical-json] }
   composition_delete: { formats: [canonical-json] }
+  composition_direct_commit: { formats: [canonical-json] }
+  composition_lifecycle: { formats: [canonical-json] }
   composition_read: { formats: [canonical-json] }
   composition_read_container: { formats: [canonical-json] }
   composition_read_flat_not_acceptable: { formats: [canonical-json] }
@@ -799,6 +922,8 @@ documents:
   composition_tags: { formats: [canonical-json] }
   composition_tags_party_uid: { formats: [canonical-json] }
   composition_tags_refused: { formats: [canonical-json] }
+  composition_tags_semantics: { formats: [canonical-json] }
+  composition_text_value_refused: { formats: [canonical-json] }
   composition_update: { formats: [canonical-json] }
   composition_update_refused: { formats: [canonical-json] }
   composition_update_xml_write_refused: { formats: [canonical-json] }
@@ -848,9 +973,11 @@ documents:
   adl2_dv_text: { formats: [canonical-json] }
   adl2_dv_time: { formats: [canonical-json] }
   adl2_dv_uri: { formats: [canonical-json] }
+  adl2_at_coded: { formats: [canonical-json] }
   content_observation: { formats: [canonical-json] }
   contribution_create: { formats: [canonical-json] }
   contribution_create_refused: { formats: [canonical-json] }
+  contribution_lifecycle: { formats: [canonical-json] }
   contribution_read: { formats: [canonical-json] }
   contribution_read_flat_not_acceptable: { formats: [canonical-json] }
   contribution_read_structured_not_acceptable: { formats: [canonical-json] }
@@ -904,6 +1031,7 @@ documents:
   ehr_bulk_load: { formats: [canonical-json] }
   ehr_committal: { formats: [canonical-json] }
   ehr_status: { formats: [canonical-json] }
+  ehr_status_direct_commit: { formats: [canonical-json] }
   ehr_status_flags: { formats: [canonical-json] }
   ehr_status_read_flat_not_acceptable: { formats: [canonical-json] }
   ehr_status_read_structured_not_acceptable: { formats: [canonical-json] }
@@ -917,25 +1045,32 @@ documents:
   ehr_tags: { formats: [canonical-json] }
   ehr_xml_not_acceptable_json_setup: { formats: [canonical-json] }
   group: { formats: [canonical-json] }
+  group_direct_commit: { formats: [canonical-json] }
   group_refused: { formats: [canonical-json] }
   group_tags: { formats: [canonical-json] }
   legacy_write_refused: { formats: [canonical-json] }
   organisation: { formats: [canonical-json] }
+  organisation_direct_commit: { formats: [canonical-json] }
   organisation_refused: { formats: [canonical-json] }
   organisation_tags: { formats: [canonical-json] }
   party_read_xml_not_acceptable: { formats: [canonical-json] }
   party_write_xml_not_acceptable: { formats: [canonical-json] }
   party_xml_write_refused: { formats: [canonical-json] }
   person: { formats: [canonical-json] }
+  person_direct_commit: { formats: [canonical-json] }
   person_refused: { formats: [canonical-json] }
   person_tags: { formats: [canonical-json] }
   role: { formats: [canonical-json] }
+  role_direct_commit: { formats: [canonical-json] }
   role_refused: { formats: [canonical-json] }
   role_tags: { formats: [canonical-json] }
   smart_scopes: { formats: [canonical-json] }
   system_options: { formats: [canonical-json] }
   template_adl14: { formats: [canonical-json] }
+  template_adl14_xml_v2: { formats: [canonical-xml] }
   template_adl2: { formats: [canonical-json] }
+  template_adl2_endpoint: { formats: [canonical-json] }
+  template_adl2_at_coded: { formats: [canonical-json] }
   version_signature: { formats: [canonical-json] }
   versioned_party: { formats: [canonical-json] }
   versioned_party_read_xml_not_acceptable: { formats: [canonical-json] }
@@ -944,18 +1079,18 @@ documents:
 # change that adds workflows raises the floor in the same change.
 floors:
   admin: 17
-  composition: 207
-  content: 447
+  composition: 211
+  content: 444
   contribution: 69
-  definition: 46
-  demographic: 369
+  definition: 75
+  demographic: 372
   directory: 87
   ehr: 50
-  ehr_status: 77
+  ehr_status: 79
   item_tags: 71
   query: 194
   security: 11
-  simplified_formats: 137
+  simplified_formats: 139
   smart: 3
   system: 3
 # The capability folders verified only over the routes of the sources under

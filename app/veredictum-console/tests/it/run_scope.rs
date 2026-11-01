@@ -13,19 +13,13 @@ use veredictum_console::run_api::{
     SigningChoice, SigningPosture, SpecProfileChoice,
 };
 
+use veredictum_console::error::ConsoleError;
+
 use crate::engine_gate;
 
 /// The document filter the equality gate drives: one small document, so the
 /// run is seconds.
 const SCOPE_FILTER: &str = engine_gate::GATE_DOCUMENT;
-
-/// The listing the console reads at startup, over the committed catalogue.
-fn committed_listing() -> std::sync::Arc<Result<veredictum::pipeline::listing::Listing, String>> {
-    std::sync::Arc::new(
-        veredictum::pipeline::listing::read(&engine_gate::repo_root().join("catalogue"), None)
-            .map_err(|e| e.to_string()),
-    )
-}
 
 #[expect(
     clippy::panic_in_result_fn,
@@ -43,21 +37,10 @@ fn the_scope_preview_counts_what_the_engine_processes() -> Result<(), Box<dyn st
     }
     let engine = Engine::verified(&binary)?;
 
-    let state = veredictum_console::state::ConsoleState {
-        root: engine_gate::repo_root().join("catalogue"),
-        specs: engine_gate::repo_root().join("specs/openehr"),
-        out: engine_gate::repo_root().join("out"),
-        catalogue: committed_listing(),
-        draft: std::sync::Arc::new(std::sync::Mutex::new(
-            veredictum_console::run_api::Drafts::new(),
-        )),
-        client_ip_header: None,
-        jobs: veredictum_console::run_job::JobSlot::default(),
-        posture: veredictum_console::posture::Posture::Local,
-        rates: veredictum_console::rate_limit::RateLimiter::default(),
-        capture: false,
-        metrics: veredictum_console::metrics::Metrics::default(),
-    };
+    let state = crate::support::state(
+        &crate::support::repo_root().join("out"),
+        crate::support::committed_listing(),
+    );
     let preview = veredictum_console::run_api::read::scope_preview(&state, SCOPE_FILTER)
         .map_err(|e| format!("preview: {e}"))?;
     let documents = veredictum_console::run_api::read::filtered_documents(&state, SCOPE_FILTER)
@@ -98,7 +81,8 @@ fn a_filter_that_selects_no_document_is_refused() {
     let state = drafted_state();
     let refused = veredictum_console::run_api::read::filtered_documents(&state, "no-such-document");
     assert!(
-        refused.is_err_and(|e| e.contains("no-such-document")),
+        refused.is_err_and(|e| matches!(e, ConsoleError::Invalid { .. })
+            && e.to_string().contains("no-such-document")),
         "an empty selection is refused by name"
     );
     assert_eq!(
@@ -114,21 +98,10 @@ fn a_filter_that_selects_no_document_is_refused() {
 )]
 #[test]
 fn the_draft_view_carries_no_secret() -> Result<(), Box<dyn std::error::Error>> {
-    let state = veredictum_console::state::ConsoleState {
-        root: "catalogue".into(),
-        specs: "specs/openehr".into(),
-        out: "out".into(),
-        catalogue: std::sync::Arc::new(Err(String::from("unused"))),
-        draft: std::sync::Arc::new(std::sync::Mutex::new(
-            veredictum_console::run_api::Drafts::new(),
-        )),
-        client_ip_header: None,
-        jobs: veredictum_console::run_job::JobSlot::default(),
-        posture: veredictum_console::posture::Posture::Local,
-        rates: veredictum_console::rate_limit::RateLimiter::default(),
-        capture: false,
-        metrics: veredictum_console::metrics::Metrics::default(),
-    };
+    let state = crate::support::state(
+        &crate::support::repo_root().join("out"),
+        crate::support::absent("unused"),
+    );
     veredictum_console::run_api::read::save_connection(
         &state,
         engine_gate::gate_submitter(),
@@ -202,10 +175,6 @@ fn a_credential_form_debug_rendering_carries_no_secret() {
 /// claim gates below.
 fn drafted_state() -> veredictum_console::state::ConsoleState {
     veredictum_console::state::ConsoleState {
-        root: engine_gate::repo_root().join("catalogue"),
-        specs: engine_gate::repo_root().join("specs/openehr"),
-        out: engine_gate::repo_root().join("out"),
-        catalogue: committed_listing(),
         draft: std::sync::Arc::new(std::sync::Mutex::new(engine_gate::drafts_of(RunDraft {
             profile: veredictum::arazzo::spec_profile::SpecProfile::Development,
             base_url: String::from("http://unused"),
@@ -222,12 +191,10 @@ fn drafted_state() -> veredictum_console::state::ConsoleState {
             filter: None,
             postures: DeclaredPostures::default(),
         }))),
-        jobs: veredictum_console::run_job::JobSlot::default(),
-        client_ip_header: None,
-        posture: veredictum_console::posture::Posture::Local,
-        rates: veredictum_console::rate_limit::RateLimiter::default(),
-        capture: false,
-        metrics: veredictum_console::metrics::Metrics::default(),
+        ..crate::support::state(
+            &crate::support::repo_root().join("out"),
+            crate::support::committed_listing(),
+        )
     }
 }
 
@@ -306,8 +273,9 @@ fn a_pasted_claim_is_schema_validated_before_it_is_stored() -> Result<(), Box<dy
 fn the_capability_rows_are_the_listings_own_folders() -> Result<(), Box<dyn std::error::Error>> {
     let state = drafted_state();
     let listing = state.catalogue.as_ref().as_ref().map_err(Clone::clone)?;
-    let rows = veredictum_console::run_api::read::capability_rows(&state)
-        .map_err(|e| format!("capability rows: {e}"))?;
+    let rows =
+        veredictum_console::run_api::read::capability_rows(&state, engine_gate::gate_submitter())
+            .map_err(|e| format!("capability rows: {e}"))?;
     let folders = listing.capabilities();
     assert_eq!(rows.len(), folders.len(), "one row per capability folder");
     for row in &rows {
@@ -322,6 +290,103 @@ fn the_capability_rows_are_the_listings_own_folders() -> Result<(), Box<dyn std:
             row.name
         );
     }
+    Ok(())
+}
+
+/// The capability rows of a drafted state whose server answered System
+/// OPTIONS with `endpoints`, or never stated the member when `None`.
+fn rows_with_endpoints(
+    endpoints: Option<&[&str]>,
+) -> Result<Vec<veredictum_console::run_api::CapabilityRow>, Box<dyn std::error::Error>> {
+    use veredictum_console::identity::{IdentityAnswer, StatedIdentity};
+
+    let state = drafted_state();
+    {
+        let mut guard = state.draft.lock().map_err(|e| e.to_string())?;
+        let draft = guard
+            .get_mut(engine_gate::gate_submitter())
+            .ok_or("the drafted state holds the gate submitter's draft")?;
+        draft.identity = Some(IdentityAnswer::Stated(StatedIdentity {
+            endpoints: endpoints.map(|list| list.iter().map(|e| (*e).to_owned()).collect()),
+            ..StatedIdentity::default()
+        }));
+    }
+    Ok(veredictum_console::run_api::read::capability_rows(
+        &state,
+        engine_gate::gate_submitter(),
+    )?)
+}
+
+/// The names of the rows that start checked.
+fn started(rows: &[veredictum_console::run_api::CapabilityRow]) -> Vec<&str> {
+    rows.iter()
+        .filter(|row| row.starts_checked)
+        .map(|row| row.name.as_str())
+        .collect()
+}
+
+/// #669: a server listing every top-level resource of the released
+/// `Options.yaml` example starts every capability checked.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ? (https://doc.rust-lang.org/book/ch11-01-writing-tests.html)"
+)]
+#[test]
+fn a_full_endpoint_list_starts_every_capability_checked() -> Result<(), Box<dyn std::error::Error>>
+{
+    let rows = rows_with_endpoints(Some(&[
+        "/ehr",
+        "/demographic",
+        "/definition",
+        "/query",
+        "/admin",
+    ]))?;
+    assert!(!rows.is_empty());
+    assert_eq!(started(&rows).len(), rows.len(), "{rows:?}");
+    Ok(())
+}
+
+/// #669: a server listing only `/ehr` starts the capabilities addressing only
+/// `/ehr` (or the API root) checked, and every other one unchecked.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ? (https://doc.rust-lang.org/book/ch11-01-writing-tests.html)"
+)]
+#[test]
+fn a_partial_endpoint_list_starts_only_the_listed_capabilities_checked()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rows = rows_with_endpoints(Some(&["/ehr/"]))?;
+    for row in &rows {
+        let only_ehr = row.resources.iter().all(|resource| resource == "/ehr");
+        assert_eq!(row.starts_checked, only_ehr, "{row:?}");
+    }
+    let checked = started(&rows);
+    assert!(checked.contains(&"ehr"), "{checked:?}");
+    assert!(!checked.contains(&"query"), "{checked:?}");
+    assert!(!checked.contains(&"demographic"), "{checked:?}");
+    Ok(())
+}
+
+/// #669: a server that lists no endpoints, by an empty list or by leaving the
+/// member out, starts every capability that addresses a resource unchecked,
+/// and one that never stated the member starts every capability unchecked.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ? (https://doc.rust-lang.org/book/ch11-01-writing-tests.html)"
+)]
+#[test]
+fn a_server_listing_no_endpoints_starts_nothing_checked() -> Result<(), Box<dyn std::error::Error>>
+{
+    let rows = rows_with_endpoints(Some(&[]))?;
+    for row in &rows {
+        assert_eq!(row.starts_checked, row.resources.is_empty(), "{row:?}");
+    }
+    let unstated = rows_with_endpoints(None)?;
+    assert_eq!(started(&unstated), Vec::<&str>::new());
+    let state = drafted_state();
+    let never_read =
+        veredictum_console::run_api::read::capability_rows(&state, engine_gate::gate_submitter())?;
+    assert_eq!(started(&never_read), Vec::<&str>::new());
     Ok(())
 }
 
@@ -443,7 +508,10 @@ fn a_composed_claim_saves_through_the_pasted_claim_path() -> Result<(), Box<dyn 
         engine_gate::gate_submitter(),
         &[String::from("NoSuchCapability")],
     );
-    assert!(unknown.is_err_and(|e| e.contains("NoSuchCapability")));
+    assert!(
+        unknown.is_err_and(|e| matches!(e, ConsoleError::Invalid { .. })
+            && e.to_string().contains("NoSuchCapability"))
+    );
     Ok(())
 }
 
@@ -515,7 +583,11 @@ fn an_unusable_posture_declaration_is_refused_by_name() -> Result<(), Box<dyn st
         ..PostureForm::default()
     })
     .expect_err("a pgp posture with no key cannot verify anything");
-    assert!(keyless.contains("no public key"), "{keyless}");
+    assert!(
+        matches!(keyless, ConsoleError::Invalid { .. })
+            && keyless.to_string().contains("no public key"),
+        "{keyless}"
+    );
 
     let junk = veredictum_console::run_api::declared_postures(&PostureForm {
         signing: SigningChoice::Pgp,
@@ -523,14 +595,26 @@ fn an_unusable_posture_declaration_is_refused_by_name() -> Result<(), Box<dyn st
         ..PostureForm::default()
     })
     .expect_err("a key the verifier cannot read is refused");
-    assert!(junk.contains("PGP PUBLIC KEY BLOCK"), "{junk}");
+    assert!(
+        matches!(junk, ConsoleError::Invalid { .. })
+            && junk.to_string().contains("PGP PUBLIC KEY BLOCK"),
+        "{junk}"
+    );
 
     let oversized = veredictum_console::run_api::declared_postures(&PostureForm {
         system_id: "s".repeat(4096),
         ..PostureForm::default()
     })
     .expect_err("an abusive system id is capped");
-    assert!(oversized.contains("the cap is"), "{oversized}");
+    assert_eq!(
+        oversized,
+        ConsoleError::TooLong {
+            field: String::from("system id"),
+            bytes: 4096,
+            cap: 256,
+        }
+    );
+    assert!(oversized.to_string().contains("the cap is"), "{oversized}");
 
     // A declared digest posture narrows to the typed carrier, parameters and
     // all, and an empty prefix stays empty rather than becoming a stand-in.

@@ -120,10 +120,10 @@ enum Command {
     /// or a recording that does not replay. The line before the exit names
     /// both counts. `--rejudge` exits the same way.
     Test {
-        /// The catalogue root, holding `capabilities.yaml` and `cases/`. Its
-        /// parent holds the vendored `specs/` tree its citations and OAS
-        /// sources resolve against. The container image sets it to the
-        /// catalogue it ships.
+        /// The catalogue root, holding `capabilities.yaml` and `cases/`.
+        /// Without `--specs`, its parent holds the vendored `specs/` tree its
+        /// citations and OAS sources resolve against. The container image
+        /// sets it to the catalogue it ships.
         #[arg(
             long,
             env = "VEREDICTUM_CATALOGUE",
@@ -214,18 +214,28 @@ enum Command {
         /// `development` (the default): the pinned `master` of each openEHR
         /// specification repository under `specs/openehr-development/`, the
         /// line that carries the newest text. A case citing text the snapshot lacks is skipped as
-        /// `cited-text-absent`, naming what is missing. The results name the
+        /// `cited-text-absent`, naming what is missing, and a case whose
+        /// cited text the snapshot contests is skipped as
+        /// `contested-in-development`, naming its upstream report. The results name the
         /// profile and every snapshot commit, and a development result never
         /// builds a certificate and is never compared with or counted toward
         /// a released result.
         ///
         /// `released`: the frozen release under `specs/openehr/`. Only a
-        /// released result backs a released claim or a certificate.
+        /// released result backs a released claim or a certificate. A case
+        /// resting on development text alone, a citation under
+        /// `specs/openehr-development/`, is skipped as `development-only`.
         ///
         /// The catalogue is gated against the release under either profile.
         /// A re-judgement takes the profile the recorded run was given.
         #[arg(long, value_enum, default_value_t = ProfileArg::Development)]
         profile: ProfileArg,
+        /// The vendored openEHR spec tree; citations resolve against the
+        /// directory two levels above it, and the development snapshot sits
+        /// at `specs/openehr-development/` beside it. Without it, the tree is
+        /// `specs/openehr` in the parent of `--root`.
+        #[arg(long)]
+        specs: Option<PathBuf>,
     },
     /// Read a server's identity from the ITS-REST System OPTIONS operation and
     /// print it as one JSON document.
@@ -275,7 +285,14 @@ enum Command {
         /// file, section or quote the snapshot lacks is printed as `[info]`
         /// and counted per component; it is never a finding. A citation
         /// refused for any other reason is a `profile-citation` finding.
+        /// One more line counts the development-only workflows, the
+        /// released cases whose cited text the snapshot rewords or removes,
+        /// and the released cases whose cited text it contests.
         /// Needs `--specs`.
+        ///
+        /// A development-only citation, one under
+        /// `specs/openehr-development/`, is checked against the snapshot
+        /// under both profiles, and a bad one is a finding.
         #[arg(long, value_enum, default_value_t = ProfileArg::Released)]
         profile: ProfileArg,
         /// A submitted declaration (`statement.json`) to hold to the static
@@ -532,23 +549,29 @@ enum Command {
     /// byte-deterministic function of the document. Every badge reports the
     /// vendor's own run, and none is a certificate.
     ///
+    /// Each badge carries one fact: the label names the subject and the
+    /// message gives one short value. The SVG title and `aria-label` carry the
+    /// full text.
+    ///
     /// An Arazzo results document draws four: `base` (the BASE rows),
     /// `options` (the rows of the selected option arms and of the cases
     /// resting on TRIAL text), `profile` (the specification profile) and
-    /// `instrument` (the version, and `self-run`). A counting badge reads
+    /// `instrument` (`self-run` and the version). A counting badge reads
     /// passed out of the rows that bear on the verdict (passed, failed,
-    /// errored), then its failed, errored and warning counts; a warning row, a
-    /// SHOULD the server did not follow, is neither a pass nor a failure and
-    /// stays out of the ratio. Each counting badge names the profile in its
-    /// label, so a development tally never reads as a released one. A counting
-    /// badge is green only when no row failed or errored: red when a row counts
-    /// against the server (it failed, or errored with the server or no one
-    /// named), orange when none does but an errored row is inconclusive, grey
-    /// when nothing passed. A warning changes no colour.
+    /// errored), then the failed and errored counts. A warning row, a SHOULD
+    /// the server did not follow, changes no colour and shows on no badge;
+    /// the results carry it. A counting badge of a
+    /// development result says `dev` in its label, so a development tally
+    /// never reads as a released one. A counting badge is green only when no
+    /// row failed or errored: red when a row counts against the server (it
+    /// failed, or errored with the server or no one named), orange when none
+    /// does but an errored row is inconclusive, grey when nothing passed. A
+    /// warning changes no colour.
     ///
-    /// A `perf-result` draws one, `perf`: the workload in the label and the
-    /// knee as the record states it, in a neutral colour, because a knee is a
-    /// reading and never a pass or a failure.
+    /// A `perf-result` draws three: `perf` (the workload in the label, the
+    /// knee in whole requests per second, rounded outward), `noise` (whether
+    /// an A/A floor is attached) and `instrument`. A knee is a reading and
+    /// never a pass or a failure, so it is drawn in a neutral colour.
     ///
     /// Exit status: `0` when every badge was written; `2` when the document
     /// cannot be read or a file cannot be written.
@@ -737,9 +760,11 @@ fn main() -> ExitCode {
             out,
             rejudge,
             profile,
+            specs,
         } => test_command(
             &ArazzoRunRequest {
                 root: &root,
+                specs: specs.as_deref(),
                 statement: statement.as_deref(),
                 ixit: ixit.as_deref(),
                 documents: &documents,

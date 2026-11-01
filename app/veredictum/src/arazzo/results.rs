@@ -73,6 +73,13 @@ pub enum SkipReason {
     /// A text the case cites is absent from the specification profile the
     /// run reads.
     CitedTextAbsent,
+    /// The case rests on text only the development snapshot holds, and the
+    /// run reads the released profile.
+    DevelopmentOnly,
+    /// The development snapshot keeps the case's cited text unchanged and
+    /// contradicts it in another text, recorded by an upstream report, and
+    /// the run reads the development profile.
+    ContestedInDevelopment,
 }
 
 impl SkipReason {
@@ -85,6 +92,8 @@ impl SkipReason {
         Self::ExtensionNotOffered,
         Self::NotDeclared,
         Self::CitedTextAbsent,
+        Self::DevelopmentOnly,
+        Self::ContestedInDevelopment,
     ];
 }
 
@@ -98,6 +107,8 @@ impl fmt::Display for SkipReason {
             Self::ExtensionNotOffered => "extension-not-offered",
             Self::NotDeclared => "not-declared",
             Self::CitedTextAbsent => "cited-text-absent",
+            Self::DevelopmentOnly => "development-only",
+            Self::ContestedInDevelopment => "contested-in-development",
         })
     }
 }
@@ -187,7 +198,7 @@ pub fn relink(
         .iter()
         .filter(|_| profile == SpecProfile::Development)
         .filter_map(|c| {
-            c.development.as_deref().map(|wording| {
+            c.wording().map(|wording| {
                 (
                     (c.source.as_str(), c.section.as_str(), c.quote.as_str()),
                     wording,
@@ -264,7 +275,10 @@ pub struct Skip {
     /// The citation that makes the case not apply.
     pub why: Why,
     /// What the reason leaves to say: for `cited-text-absent`, the profile
-    /// and what of the cited text it lacks.
+    /// and what of the cited text it lacks; for `development-only`, the
+    /// development citation the case rests on; for
+    /// `contested-in-development`, the upstream report and the contested
+    /// citation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -527,10 +541,11 @@ fn write_why(f: &mut fmt::Formatter<'_>, why: Option<&Why>) -> fmt::Result {
 
 /// The upstream URL of a vendored file at the commit its tree was taken from.
 ///
-/// The tree is `specs/openehr/<component>/`, `specs/rest-oas/` or
-/// `specs/its-json-schemas/`, and its `PROVENANCE.md` names the source
-/// repository and the commit. `None` when the file is outside those trees or
-/// the provenance names neither.
+/// The tree is `specs/openehr/<component>/`, `specs/rest-oas/`,
+/// `specs/its-json-schemas/` or a repository directory of the development
+/// snapshot, and its `PROVENANCE.md` names the source repository and the
+/// commit. `None` when the file is outside those trees or the provenance
+/// names neither.
 #[must_use]
 pub fn upstream_link(source: &str, repo_root: &Path) -> Option<String> {
     upstream_link_in(source, repo_root, SpecProfile::Released)
@@ -542,11 +557,13 @@ pub fn upstream_link(source: &str, repo_root: &Path) -> Option<String> {
 /// Under [`SpecProfile::Released`] it is [`upstream_link`]. Under another
 /// profile the source maps onto that profile's tree
 /// ([`SpecProfile::file_of`]), whose provenance names the commit; `None`
-/// when the profile holds no such file.
+/// when the profile holds no such file. A development-only source links to
+/// the snapshot under every profile.
 #[must_use]
 pub fn upstream_link_in(source: &str, repo_root: &Path, profile: SpecProfile) -> Option<String> {
-    if profile != SpecProfile::Released {
-        let path = if source.starts_with(&format!("{DEVELOPMENT_ROOT}/")) {
+    let development_only = source.starts_with(&format!("{DEVELOPMENT_ROOT}/"));
+    if profile != SpecProfile::Released || development_only {
+        let path = if development_only {
             source.to_owned()
         } else {
             profile.file_of(repo_root, source)?
@@ -618,6 +635,7 @@ fn provenance_link(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arazzo::cite::Development;
 
     fn root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -648,6 +666,27 @@ mod tests {
             )
         );
         assert_eq!(upstream_link("artifacts/x.yaml", &root()), None);
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "the Book ch11 Result-returning test shape: assertions panic, plumbing propagates with ?"
+    )]
+    fn a_development_only_file_links_to_the_snapshot_under_every_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "specs/openehr-development/specifications-ITS-XML/components/AM/Release-1.4/Template.xsd";
+        let link = upstream_link(source, &root()).ok_or("the snapshot file links")?;
+        assert!(
+            link.starts_with("https://github.com/openEHR/specifications-ITS-XML/blob/")
+                && link.ends_with("/components/AM/Release-1.4/Template.xsd"),
+            "{link}"
+        );
+        assert_eq!(
+            upstream_link_in(source, &root(), SpecProfile::Development).as_deref(),
+            Some(link.as_str())
+        );
+        Ok(())
     }
 
     fn stating(version: Option<&str>) -> ServerIdentity {
@@ -764,11 +803,11 @@ mod tests {
             quote: released_quote.to_owned(),
             report: None,
             level: None,
-            development: Some(Box::new(DevelopmentText {
+            development: Some(Box::new(Development::Reworded(DevelopmentText {
                 source: None,
                 section: "Version Lifecycle".to_owned(),
                 quote: "the snapshot's wording".to_owned(),
-            })),
+            }))),
         };
         let row = || ResultRow {
             case: "c/w".to_owned(),

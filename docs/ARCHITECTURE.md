@@ -1662,6 +1662,36 @@ normalization) in the named file. A citation names a file under
 `specs/its-xml-schemas/`, never the SM. A file under
 `specs/openehr/ITS-REST/specifications/` or `specs/rest-oas/` is an OAS
 citation and ranks below the docs text (hard rule 1).
+A citation may instead name a file of the pinned development snapshot under
+`specs/openehr-development/`: development text alone, which no release holds
+(#999). `validate` checks it against the snapshot under both profiles, and it
+carries no `development` member. A workflow carrying one is a
+development-only case: the released profile skips it as `development-only`,
+the development profile runs and judges it, and no surface, floor, claim or
+released tally counts it, since a development result never counts toward a
+released one (hard rule 1). No openEHR spec governs this; it is our own design.
+
+A citation of released text may carry a `development` member, read under the
+development profile only. Where the snapshot states the requirement in other
+words, the member is that wording, `{source?, section, quote}`, quoted from
+the snapshot in place of `section` and `quote`, and `validate` refuses it once
+the released quote still occurs there unchanged. Where the snapshot keeps the
+cited text unchanged and another of its texts contradicts it, the member is
+`{ contested: <n> }`, naming the `upstream-report` issue that records the
+contradiction (#1006). The two forms exclude each other. A workflow with any
+contested citation is skipped as `contested-in-development` under the
+development profile, so a development run grades no server on one side of a
+contradiction; the released profile judges the released quote as before.
+`scripts/checks/report-refs.sh` holds a `contested` number to the tracker
+exactly like `report`.
+
+A citation into the AsciiDoc of a component's documents (`docs/` under a
+component, released or snapshot) names published text only: the file must be
+reachable through the active `include::` directives, comments excluded, of
+the `master.adoc` of a current document the component's manifest lists.
+`validate` refuses any other file, such as the RM tags chapter the released
+Common IM comments out (#1011). No openEHR spec governs either rule; both are
+our own design.
 
 **`x-veredictum-check`**, on a criterion, for the three judgements no standard
 criterion type can express. Arazzo requires every criterion to carry a
@@ -1678,8 +1708,8 @@ when both the condition and the judge hold:
 | `json_type` | The value at a runtime expression is one of the six JSON types of RFC 8259 §3 (§15.6 rule 11) |
 
 Every other check is a standard Arazzo criterion. Field values use `jsonpath`
-or `regex`; status codes and counts use `simple`. An XML document's `xpath`
-criteria are refused until #637 (§15.6 rule 4).
+or `regex`; status codes and counts use `simple`. An XML document is judged
+with `xpath` criteria under §15.6 rule 4.
 Response-schema validation runs only where a case asks for it, through the
 `schema` judge on a criterion that carries its own citation, like every other
 expectation. It never runs on every response by default: an OAS schema can
@@ -1836,8 +1866,43 @@ enforced by `validate` and the evaluator. Every rule stays inside what Arazzo
    backreferences, which `validate` refuses. A value substituted into a
    pattern through `{$…}` is a literal: its metacharacters are escaped.
 3. **`jsonpath`** is RFC 9535.
-4. **`xpath`** criteria are refused until a vetted XPath 3.1 engine judges them
-   (#637); a document that needs one is a gate finding, never a skipped check.
+4. **`xpath`** is XPath 3.1, the default Arazzo 1.1.0 names: an Expression
+   Type Object naming `xpath-30`, `xpath-20` or `xpath-10` is refused. The
+   `context` is the whole `$response.body`, parsed as XML, and the condition
+   holds when the Effective Boolean Value of its result is true (Arazzo 1.1.0
+   §XPath Conditions, XPath 3.1 §2.4.3). Three prefixes are bound for every
+   condition, whatever prefixes the server's document declares: `oe` to
+   `http://schemas.openehr.org/v1` (ITS-XML Release-1.0.2, the stable
+   lineage), `oe2` to `http://schemas.openehr.org/v2` (ITS-XML Release-2.0.0,
+   `specs/openehr/ITS-XML/README.adoc` §Releases and IM Versions) and `xsi` to
+   `http://www.w3.org/2001/XMLSchema-instance`; XPath 3.1 binds `xs`, `fn`,
+   `map`, `array` and `math` itself. `validate` compiles every condition, so
+   a syntax error, an unknown function or an unbound prefix is a gate
+   finding. A value substituted through `{$…}` inside a string literal has its
+   delimiter doubled (XPath 3.1 §A.2.1); outside a literal only a numeric
+   literal is placed, and any other value makes the row *errored*. An empty
+   body fails the criterion, and a body that is not well-formed XML, a
+   dynamic error and a result with no Effective Boolean Value (`FORG0006`)
+   make the row *errored* (rules 6 and 8).
+
+   The engine is `oxixml-xpath` 0.1.2 with its `oxixml-infoset` XML reader,
+   pinned exactly, chosen on 2026-10-31 (#637) against three criteria.
+   *Coverage:* the W3C QT3 suite at `w3c/qt3tests` commit `201a6e4`, run with
+   the crate's own harness, passed 20,028 of 20,207 attempted cases (99.1%;
+   operators and productions 99.8%, functions, maps and arrays 98.3%).
+   *Licence and advisories:* Apache-2.0, and `cargo deny check` against this
+   repository's `deny.toml` passes with no exception; the eleven crates it
+   adds are one workspace's, with no third-party dependency and
+   `#![forbid(unsafe_code)]` in each. *Maintenance:* the weakest of the
+   three, a single-maintainer project first published 2026-07-29 with three
+   releases. The alternatives were refused: `xee-xpath` 0.1.5, the only other
+   XPath 3.1 engine, fails `cargo deny` on RUSTSEC-2022-0081 (`json`,
+   unmaintained, at run time) and RUSTSEC-2024-0370 (`proc-macro-error`) and
+   adds about 200 crates; `xrust`, `oxml`, `sxd-xpath` and their kin are XPath
+   1.0. Known gaps: the harness skips 11,614 QT3 cases needing schema
+   awareness, serialization, XSLT or XQuery-only constructs, none of which a
+   condition here uses; the reader refuses an external entity and caps
+   entity expansion, so a document that relies on either is *errored*.
 5. **Headers.** A step may send any header, including `Accept`, `Content-Type`
    and `Authorization`, whether or not the operation declares it. OAS 3.0.3
    tells a tool to ignore those three as declared parameters, and content
@@ -1849,7 +1914,12 @@ enforced by `validate` and the evaluator. Every rule stays inside what Arazzo
    should have produced the output failed only `level: should` criteria:
    then the row takes the warning outcome of the first of them, naming it
    (rule 10, #674), because the instrument did judge the exchange. `simple`
-   compares against integers, booleans and `null`.
+   compares against integers, booleans and `null`. A whole-body
+   `$response.body`, with no JSON Pointer, reads a body whose `Content-Type`
+   is not a JSON media type (`application/json` or a `+json` suffix) as its
+   text, so a criterion can judge an ADL or plain-text answer. A body labelled
+   JSON that does not parse, a body with no `Content-Type`, and a pointer into
+   a text body stay unreadable.
 7. **Generated inputs.** An input of `format: uuid` with no supplied value is a
    fresh random UUID per row, recorded in the results so a replay reuses it.
 8. **Evaluation errors.** Arazzo says an evaluation error evaluates to *fail*.
@@ -1953,6 +2023,9 @@ run, and always carries one reason from a closed list, with its citation:
 | `format-not-claimed` | the case needs a format outside the claimed tech profile |
 | `extension-not-offered` | the case drives an extension route the vendor does not declare |
 | `not-declared` | a value the case needs from the party's IXIT or statement is not declared |
+| `cited-text-absent` | the cited text is absent from the profile the run used |
+| `development-only` | the case rests on development text alone and the run reads the released profile |
+| `contested-in-development` | the development snapshot keeps the cited text unchanged and contradicts it in another text, recorded by an upstream report, and the run reads the development profile |
 
 Every red row in `results.json` and in the rendered report carries four parts,
 derived from the case and the recording with nothing extra to author:
@@ -2007,10 +2080,15 @@ vendor reads why a row is red without opening `results.json`.
   verbatim in its file.
 - **Profile**: no `simple` string comparison, no regex lookaround or
   backreferences, and every expression parses.
-- **Level**: a citation's `level` agrees with its quote. A quote carrying
-  SHOULD or RECOMMENDED but no MUST, SHALL or REQUIRED needs `level: should`,
-  and the reverse is refused; a quote whose only keyword is MAY or OPTIONAL is
-  refused outright, because permission is never asserted.
+- **Level**: a citation's `level` agrees with its quote, by the one rule of
+  §15.6 rule 10 for every citation the gates read: a workflow criterion, a
+  rows aggregate, an `applies` range, and an option or `decides` citation in
+  `capabilities.yaml`. A quote carrying SHOULD or RECOMMENDED but no MUST,
+  SHALL or REQUIRED needs `level: should`, and the reverse is refused; a quote
+  whose only keyword is MAY or OPTIONAL needs `level: may`, and is refused at
+  the default `must`. A `may` criterion is then judged like a `must` one,
+  while an option citation is judged by no row: it grounds the option whose
+  arm a statement selects.
 - **Unknown keys**: a key that is neither an Arazzo field nor one of the six
   extensions, in the place §15.4 allows it, is refused. A parser that captures extensions through a catch-all
   map drops a misspelled key such as `succesCriteria` without an error, so the
@@ -2056,7 +2134,9 @@ vendor reads why a row is red without opening `results.json`.
   sections. A document no option arm names is BASE and names one declared
   section with `info.x-veredictum-section`; a document an arm names is
   OPTION and names none, so BASE and OPTION are derived from
-  `capabilities.yaml` and never declared twice. A section no document uses,
+  `capabilities.yaml` and never declared twice. The gate reads the options
+  of the released profile, so a document only an option with
+  `profile: development` names is BASE here and keeps its section. A section no document uses,
   an option with no theme and tier, a `spec-boundary` option whose citation
   names no `report`, a case of a formalism folder whose setups upload no
   template or templates of both formalisms, and a cited file in no vendored
@@ -2064,6 +2144,23 @@ vendor reads why a row is red without opening `results.json`.
   snapshot of every cited upstream report's title and state, holds exactly
   the reports the citations name, and `scripts/checks/report-refs.sh` holds
   it to the tracker.
+- **Development setups** (`arazzo-development-setup`): a workflow that is
+  not development-only and names, in `dependsOn`, a development-only
+  workflow, directly or through other setups, in its own document or in
+  another, is refused, and the finding names both workflows and the
+  development citation. A setup runs whatever it cites, so the pairing would
+  rest a released verdict on development text (hard rule 1). A
+  development-only workflow may depend on anything. No openEHR spec governs
+  this; it is our own design.
+- **`dependsOn` cycles** (`arazzo-depends-on-cycle`): a workflow whose
+  `dependsOn` leads back to itself, directly, through other workflows of its
+  document, or through `$sourceDescriptions.<name>.<workflowId>` of other
+  documents (Arazzo 1.1.0 §Workflow Object `dependsOn`), is refused, once per
+  workflow on the cycle, and the finding names the chain. Such a workflow can
+  never start, and without the gate the run would refuse it only when it
+  reached it. A setup document outside the catalogue that a `dependsOn`
+  reaches is checked the same way. No openEHR spec governs this; it is our
+  own design.
 - **Maturity** (`arazzo-citation`): every cited file's release status is
   read from the vendored manifests; a citation into a document the release
   marks RETIRED is refused, as is one whose document states no known status.
@@ -2247,7 +2344,21 @@ embedded `{$…}` expression, which the parser check reads as a placeholder.
   option in `capabilities.yaml`: its arms, each naming the documents that test
   it. The statement answers the option, and the documents of every other arm
   are skipped with `option-not-selected`. Surface coverage counts an element as
-  covered when every arm covers it.
+  covered when every arm covers it. An option carrying `profile: development`
+  is behaviour the development text alone leaves open: under the development
+  profile it is an option like any other, and a released run reads the
+  catalogue without it, so its documents are BASE there, each keeping the
+  `x-veredictum-section` it is placed by, and a statement's answer to it
+  selects nothing and is no error. `validate`, the listing and the console's
+  catalogue page read the released options, and the capabilities schema
+  refuses any `profile` value but `development`. `adl2-id-coded` is such an
+  option: development AM makes the at-code system the one an openEHR system
+  must support ("openEHR systems must support at least the at-coded ADL2
+  archetypes", `org.openehr.am.aom2.adl_code_definitions.adoc`), while the
+  release shows id-coded ADL 2 alone. A document may sit under arms of two
+  options, and runs only when the statement selects both: the ADL 2 template
+  examples sit under their format's option and under `adl2-id-coded`. No
+  openEHR spec governs the mechanism; it is our own design.
 - **Capabilities.** The folder of a document names the capability its rows
   count for. `capabilities.yaml` may list a document under further
   capabilities it exercises; those count for coverage, never for a verdict.
